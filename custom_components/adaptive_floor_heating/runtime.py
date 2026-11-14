@@ -54,12 +54,25 @@ def climate_setpoint(state, heating: bool) -> float:
     return value
 
 
+def climate_band_valid(state) -> bool:
+    """The entity's limits must leave room between the ON and OFF setpoints.
+
+    Some boiler controllers swap the setpoint meaning with their operating mode
+    (e.g. SiHAS BCM switches to a 30-60C hot-water setpoint while away). Such a
+    band cannot express room heating, so the heater is treated as unavailable
+    and no setpoint is written.
+    """
+    return climate_setpoint(state, True) - climate_setpoint(state, False) >= 2.0
+
+
 def climate_heater_state(state) -> bool | None:
     """ON when the setpoint sits above the ON/OFF midpoint; OFF when powered off."""
     if state.state in ("unavailable", "unknown"):
         return None
     if state.state == "off":
         return False
+    if not climate_band_valid(state):
+        return None
     target = state.attributes.get("temperature")
     if not isinstance(target, (int, float)):
         return None
@@ -635,6 +648,8 @@ class HeatingRuntime:
             )
         for entity_id in climates:
             state = self.hass.states.get(entity_id)
+            if state is not None and state.state != "off" and not climate_band_valid(state):
+                raise RuntimeError(f"{entity_id} setpoint range cannot express room heating")
             if heating and state is not None and state.state == "off":
                 await self.hass.services.async_call(
                     "climate", "set_hvac_mode",

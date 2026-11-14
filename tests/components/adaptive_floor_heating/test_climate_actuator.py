@@ -51,6 +51,10 @@ class ClimateHeaterStateTests(unittest.TestCase):
         self.assertIsNone(climate_heater_state(climate(state="unavailable", temperature=30)))
         self.assertIsNone(climate_heater_state(climate(temperature=None)))
 
+    def test_hot_water_band_reads_unknown(self):
+        # BCM in away/hot-water mode reports a 30-60C hot-water setpoint.
+        self.assertIsNone(climate_heater_state(climate(temperature=60, min_temp=30, max_temp=60)))
+
     def test_runtime_dispatches_by_entity_domain(self):
         self.assertIs(HeatingRuntime._switch_state(climate(temperature=30)), True)
         switch = SimpleNamespace(entity_id="switch.heater", state="on", attributes={})
@@ -90,6 +94,13 @@ class ClimateSendTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rt.hass.services.calls, [
             ("climate", "set_temperature", {"entity_id": "climate.boiler", "temperature": 10.0}),
         ])
+
+    async def test_hot_water_band_refuses_to_write(self):
+        state = climate(temperature=60, min_temp=30, max_temp=60)
+        rt = self.runtime(("climate.boiler",), {"climate.boiler": state})
+        with self.assertRaises(RuntimeError):
+            await rt._send(False)
+        self.assertEqual(rt.hass.services.calls, [])
 
     async def test_switch_heaters_keep_original_service(self):
         rt = self.runtime(("switch.heater",), {})
