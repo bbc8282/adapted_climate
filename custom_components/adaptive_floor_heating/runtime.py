@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from .actuator import SwitchActuator
 from .const import (
+    CLIMATE_OFF_TEMPERATURE, CLIMATE_ON_TEMPERATURE,
     CONF_HEATER, CONF_MODE, CONF_OUTDOOR_TEMPERATURE_SENSOR,
     CONF_TEMPERATURE_SENSOR, CONF_ZONES,
     MIN_PEAK_OBSERVATION_HOURS, MAX_PEAK_OBSERVATION_HOURS,
@@ -37,6 +38,33 @@ class PredictiveStop:
     target: float
     forecast: dict
     sunrise_saving: bool
+
+
+
+def climate_setpoint(state, heating: bool) -> float:
+    """Pick an ON/OFF setpoint clamped to the climate entity's own limits."""
+    attrs = getattr(state, "attributes", {}) or {}
+    low = attrs.get("min_temp")
+    high = attrs.get("max_temp")
+    value = CLIMATE_ON_TEMPERATURE if heating else CLIMATE_OFF_TEMPERATURE
+    if isinstance(high, (int, float)):
+        value = min(value, float(high))
+    if isinstance(low, (int, float)):
+        value = max(value, float(low))
+    return value
+
+
+def climate_heater_state(state) -> bool | None:
+    """ON when the setpoint sits above the ON/OFF midpoint; OFF when powered off."""
+    if state.state in ("unavailable", "unknown"):
+        return None
+    if state.state == "off":
+        return False
+    target = state.attributes.get("temperature")
+    if not isinstance(target, (int, float)):
+        return None
+    midpoint = (climate_setpoint(state, True) + climate_setpoint(state, False)) / 2
+    return float(target) >= midpoint
 
 
 class HeatingRuntime:
@@ -277,7 +305,12 @@ class HeatingRuntime:
 
     @staticmethod
     def _switch_state(state) -> bool | None:
-        if state is None or state.state not in ("on", "off"):
+        """Map a heater entity to ON/OFF; climate heaters use the setpoint band."""
+        if state is None:
+            return None
+        if str(getattr(state, "entity_id", "")).startswith("climate."):
+            return climate_heater_state(state)
+        if state.state not in ("on", "off"):
             return None
         return state.state == "on"
 
@@ -591,12 +624,28 @@ class HeatingRuntime:
             self._heater_unavailable_started = now
 
     async def _send(self, heating: bool) -> None:
-        """Send only switch actions; the actuator separately confirms HA state."""
-        await self.hass.services.async_call(
-            "switch", "turn_on" if heating else "turn_off",
-            {"entity_id": self.heaters[0] if len(self.heaters) == 1 else list(self.heaters)},
-            blocking=True,
-        )
+        """Send heater actions; the actuator separately confirms HA state."""
+        switches = [h for h in self.heaters if h.startswith("switch.")]
+        climates = [h for h in self.heaters if h.startswith("climate.")]
+        if switches:
+            await self.hass.services.async_call(
+                "switch", "turn_on" if heating else "turn_off",
+                {"entity_id": switches[0] if len(switches) == 1 else switches},
+                blocking=True,
+            )
+        for entity_id in climates:
+            state = self.hass.states.get(entity_id)
+            if heating and state is not None and state.state == "off":
+                await self.hass.services.async_call(
+                    "climate", "set_hvac_mode",
+                    {"entity_id": entity_id, "hvac_mode": "heat"}, blocking=True,
+                )
+            await self.hass.services.async_call(
+                "climate", "set_temperature",
+                {"entity_id": entity_id,
+                 "temperature": climate_setpoint(state, heating)},
+                blocking=True,
+            )
 
     def _fault(self, fault: str) -> None:
         if fault not in self.controller.faults:

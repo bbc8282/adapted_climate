@@ -58,3 +58,10 @@ PERSISTED_LEARNING_MODELS = ("existing", "curve")
 LATCHED_FAULTS = frozenset(
     {"actuation_fault", "heater_unavailable", "overheat", "external_override"}
 )
+
+# Climate-entity actuator (e.g. a boiler room controller with its own thermostat).
+# ON raises the controller setpoint far above room temperature so it fires;
+# OFF lowers it far below so it idles without cutting power (hot water stays on).
+CLIMATE_ON_TEMPERATURE = 30.0
+CLIMATE_OFF_TEMPERATURE = 10.0
+HEATER_DOMAINS = ("switch", "climate")

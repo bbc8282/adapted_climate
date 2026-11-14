@@ -46,6 +46,14 @@ from .const import (
 from .controller import Settings
 
 
+def _heater_state_supported(entity_id: str, state) -> bool:
+    """Switches must report on/off; climate heaters must expose heat and a setpoint."""
+    if entity_id.startswith("climate."):
+        return ("heat" in (state.attributes.get("hvac_modes") or ())
+                and isinstance(state.attributes.get("temperature"), (int, float)))
+    return state.state in (STATE_ON, STATE_OFF)
+
+
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Configure one thermostat and its optional learning inputs."""
 
@@ -188,7 +196,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema({vol.Required(
                 CONF_HEATER,
                 description={"suggested_value": (user_input or {}).get(CONF_HEATER)},
-            ): selector.EntitySelector(selector.EntitySelectorConfig(domain="switch"))}),
+            ): selector.EntitySelector(selector.EntitySelectorConfig(domain=["switch", "climate"]))}),
             errors=errors,
             description_placeholders={
                 "room_number": str(len(self._zones) + 1),
@@ -283,11 +291,11 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def _validate_pair(self, data: dict[str, Any]) -> dict[str, str]:
         """Validate live states without sending any switch service calls."""
         errors = {}
-        for field, domain in (
-            (CONF_HEATER, "switch"), (CONF_TEMPERATURE_SENSOR, "sensor")
+        for field, domains in (
+            (CONF_HEATER, ("switch.", "climate.")), (CONF_TEMPERATURE_SENSOR, ("sensor.",))
         ):
             entity_id = data.get(field)
-            if not isinstance(entity_id, str) or not entity_id.startswith(f"{domain}."):
+            if not isinstance(entity_id, str) or not entity_id.startswith(domains):
                 errors[field] = "invalid_entity"
                 continue
             state = self.hass.states.get(entity_id)
@@ -298,7 +306,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors[field] = "entity_unavailable"
                 continue
             if field == CONF_HEATER:
-                if state.state not in (STATE_ON, STATE_OFF):
+                if not _heater_state_supported(entity_id, state):
                     errors[field] = "invalid_switch"
                 elif entity_id in self._used_heaters():
                     errors[field] = "duplicate_heater"
@@ -319,14 +327,14 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     def _validate_heater(self, entity_id: Any) -> dict[str, str]:
         errors = {}
-        if not isinstance(entity_id, str) or not entity_id.startswith("switch."):
+        if not isinstance(entity_id, str) or not entity_id.startswith(("switch.", "climate.")):
             return {CONF_HEATER: "invalid_entity"}
         state = self.hass.states.get(entity_id)
         if state is None:
             return {CONF_HEATER: "invalid_entity"}
         if state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE):
             return {CONF_HEATER: "entity_unavailable"}
-        if state.state not in (STATE_ON, STATE_OFF):
+        if not _heater_state_supported(entity_id, state):
             return {CONF_HEATER: "invalid_switch"}
         if entity_id in self._used_heaters():
             return {CONF_HEATER: "duplicate_heater"}
@@ -350,7 +358,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             {
                 vol.Required(
                     CONF_HEATER, description={"suggested_value": data.get(CONF_HEATER)}
-                ): selector.EntitySelector(selector.EntitySelectorConfig(domain="switch")),
+                ): selector.EntitySelector(selector.EntitySelectorConfig(domain=["switch", "climate"])),
                 vol.Required(
                     CONF_TEMPERATURE_SENSOR,
                     description={"suggested_value": data.get(CONF_TEMPERATURE_SENSOR)},

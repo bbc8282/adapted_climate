@@ -64,7 +64,7 @@
       "invalid_setting": "허용 범위의 값을 입력하세요. 시간은 정수여야 합니다.",
       "invalid_entity": "올바른 종류의 현재 존재하는 엔티티를 선택하세요.",
       "entity_unavailable": "엔티티 상태를 확인할 수 없습니다. 정상 상태로 복구한 뒤 다시 시도하세요.",
-      "invalid_switch": "ON/OFF 상태를 제공하는 스위치를 선택하세요.",
+      "invalid_switch": "ON/OFF 상태를 제공하는 스위치, 또는 난방(heat) 모드와 설정온도를 제공하는 climate 엔티티를 선택하세요.",
       "invalid_temperature": "유효한 숫자 온도를 제공하는 온도 센서를 선택하세요.",
       "invalid_unit": "섭씨(°C) 또는 화씨(°F) 센서를 선택하세요.",
       "duplicate_heater": "다른 방 또는 통합 설정에서 이미 선택한 스위치입니다. 진행 중인 설정도 확인하세요."

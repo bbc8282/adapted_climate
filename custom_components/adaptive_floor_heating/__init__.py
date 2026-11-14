@@ -51,7 +51,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     ):
         raise ConfigEntryError("Invalid integrated multi-room configuration")
     if (not heaters
-            or any(not isinstance(heater, str) or not heater.startswith("switch.") for heater in heaters)
+            or any(not isinstance(heater, str) or not heater.startswith(("switch.", "climate.")) for heater in heaters)
             or len(set(heaters)) != len(heaters)
             or not isinstance(sensor, str) or not sensor.startswith("sensor.")):
         raise ConfigEntryError("Invalid heater or temperature sensor configuration")

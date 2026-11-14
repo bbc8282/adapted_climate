@@ -4,10 +4,10 @@
   "codeowners": ["@plplaaa2"],
   "config_flow": true,
   "dependencies": ["http", "frontend", "panel_custom"],
-  "documentation": "https://github.com/plplaaa2/adapted_climate",
+  "documentation": "https://github.com/bbc8282/adapted_climate",
   "integration_type": "device",
   "iot_class": "calculated",
-  "issue_tracker": "https://github.com/plplaaa2/adapted_climate/issues",
+  "issue_tracker": "https://github.com/bbc8282/adapted_climate/issues",
   "requirements": [],
-  "version": "1.0.0"
+  "version": "1.0.1"
 }

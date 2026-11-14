@@ -13,12 +13,19 @@ Home Assistant용 학습형 바닥난방 Climate 커스텀 통합입니다. 실�
 >
 
 
+> [!NOTE]
+> **Fork (bbc8282):** 원본 [plplaaa2/adapted_climate](https://github.com/plplaaa2/adapted_climate)에 **climate 엔티티 히터** 지원을 추가한 포크입니다.
+> 보일러 실내 조절기(예: SiHAS BCM-300)처럼 자체 온도조절이 있는 climate 엔티티를 히터로 선택하면,
+> ON은 설정온도를 30℃(기기 최대치로 제한)로 올리고 OFF는 10℃(기기 최소치로 제한)로 내려 제어합니다.
+> 전원을 끄지 않으므로 온수는 유지됩니다. 보일러 운전모드는 **실내** 모드에서 사용하세요.
+> 이 통합이 제어하는 동안 기기 앱이나 다른 자동화로 설정온도·외출 모드를 바꾸지 마세요(외부 조작으로 감지되어 정지합니다).
+
 
 ## 설치와 설정
 
-[![Home Assistant에서 저장소 열기](https://my.home-assistant.io/badges/marketplace_repository.svg)](https://my.home-assistant.io/redirect/marketplace_repository/?owner=plplaaa2&repository=adapted_climate&category=integration)
+[![Home Assistant에서 저장소 열기](https://my.home-assistant.io/badges/marketplace_repository.svg)](https://my.home-assistant.io/redirect/marketplace_repository/?owner=bbc8282&repository=adapted_climate&category=integration)
 
-1. 위 버튼으로 설치하거나 [GitHub 저장소](https://github.com/plplaaa2/adapted_climate)를 HACS 사용자 지정 저장소에 **통합** 유형으로 추가합니다. 수동 설치 시 `custom_components/adaptive_floor_heating/`을 Home Assistant 설정 디렉터리의 `custom_components/`에 복사합니다.
+1. 위 버튼으로 설치하거나 [GitHub 저장소](https://github.com/bbc8282/adapted_climate)를 HACS 사용자 지정 저장소에 **통합** 유형으로 추가합니다. 수동 설치 시 `custom_components/adaptive_floor_heating/`을 Home Assistant 설정 디렉터리의 `custom_components/`에 복사합니다.
 2. Home Assistant를 재시작하고 **설정 → 기기 및 서비스 → 통합 추가**에서 **Adaptive Floor Heating Climate**를 선택합니다.
 3. 단독 또는 통합 멀티룸 제어를 선택하고 히터 스위치와 실내 온도 센서를 연결합니다. 시작·정지 편차, 최소 ON/OFF 시간, HOME/AWAY 온도를 설정합니다. 외기별 예측에 사용할 실외 온도 센서는 선택 사항입니다.
 4. 초기 모드는 `OFF`입니다. Climate 엔티티에서 `HEAT` 또는 `AUTO`를 선택해 난방을 시작합니다.
