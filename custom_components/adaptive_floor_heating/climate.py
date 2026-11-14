@@ -113,6 +113,8 @@ class AdaptiveFloorHeatingClimate(ClimateEntity):
             "prediction_on": runtime.prediction_mode != "eco",
             "sunrise_saving_enabled": runtime.sunrise_enabled,
             "sunrise_saving_active": runtime.sunrise_saving_active,
+            # Daily target schedule and its AUTO pre-heat; related: runtime.py, schedule.py.
+            **runtime.schedule_attributes(),
             "active_off_model": runtime.active_off_model,
             # Expose the fallback plan independently of the current model; related: runtime.py, frontend/panel.js.
             "runtime_off_plan": dict(runtime.runtime_off_plan) if runtime.runtime_off_plan else None,

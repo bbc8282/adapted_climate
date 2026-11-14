@@ -78,6 +78,8 @@ def ha_boundaries():
     selector.EntitySelector = selector.NumberSelector = SelectorBoundary
     selector.EntitySelectorConfig = selector.NumberSelectorConfig = dict
     selector.NumberSelectorMode = SimpleNamespace(BOX="box")
+    selector.TextSelector = SelectorBoundary
+    selector.TextSelectorConfig = dict
     return modules
 
 
@@ -234,7 +236,10 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         result = await flow.async_step_preset_temperatures({"home_temperature": 24, "away_temperature": 19})
         self.assertEqual(result["step_id"], "optional_sensors")
         result = await flow.async_step_optional_sensors({"outdoor_temperature_sensor": "sensor.room_3"})
+        self.assertEqual(result["step_id"], "schedule")
+        result = await flow.async_step_schedule({"schedule_text": "06:00 20 weekday\n21:00 25"})
         self.assertEqual(result["step_id"], "confirm")
+        self.assertEqual(result["description_placeholders"]["schedule"], "06:00 20 weekday, 21:00 25 all")
         self.assertEqual(result["description_placeholders"]["outdoor_temperature_sensor"], "sensor.room_3")
         self.assertNotIn("supply_temperature_sensor", result["description_placeholders"])
         self.assertNotIn("return_temperature_sensor", result["description_placeholders"])
@@ -249,6 +254,10 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["data"]["outdoor_temperature_sensor"], "sensor.room_3")
         self.assertNotIn("supply_temperature_sensor", result["data"])
         self.assertNotIn("return_temperature_sensor", result["data"])
+        self.assertEqual(result["data"]["schedule_slots"], [
+            {"time": "06:00", "temperature": 20.0, "days": "weekday"},
+            {"time": "21:00", "temperature": 25.0, "days": "all"},
+        ])
 
     async def test_three_rooms_preserve_matching_and_count(self):
         result = await self.flow.async_step_multi_zone_integrated({"room_count": 3.0})

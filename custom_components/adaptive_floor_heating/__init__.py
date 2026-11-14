@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from .const import (
     CONF_HEATER, CONF_MODE, CONF_ROOM_COUNT, CONF_TEMPERATURE_SENSOR, CONF_ZONES,
-    CONF_OUTDOOR_TEMPERATURE_SENSOR,
+    CONF_OUTDOOR_TEMPERATURE_SENSOR, CONF_SCHEDULE,
     DOMAIN, MODE_MULTI_ZONE, MODE_MULTI_ZONE_INTEGRATED, MODE_STANDALONE,
 )
 
@@ -108,6 +108,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def _async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Apply validated settings through a safe unload/reload boundary."""
     from .controller import Settings
+    from .schedule import decode_slots
 
     runtime = entry.runtime_data
     if runtime is not None:
@@ -120,6 +121,10 @@ async def _async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None
             )
             if (Settings.from_options(dict(entry.options)) == runtime.controller.settings
                     and optional_sensors_match):
+                # Slot edits apply live, so saving a schedule never stops heating.
+                slots = decode_slots(entry.options.get(CONF_SCHEDULE))
+                if slots != runtime.schedule_slots:
+                    runtime.set_schedule_slots(slots)
                 return
         except ValueError:
             pass

@@ -52,6 +52,7 @@ adaptive_floor_heating_climate/
 │       ├── number.py
 │       ├── off_response.py
 │       ├── runtime.py
+│       ├── schedule.py
 │       ├── select.py
 │       ├── sensor.py
 │       ├── storage.py
@@ -86,6 +87,7 @@ adaptive_floor_heating_climate/
             ├── test_panel_frontend.cjs
             ├── test_sensor_frontend.cjs
             ├── test_runtime.py
+            ├── test_schedule.py
             └── test_thermal_model.py
 ```
 

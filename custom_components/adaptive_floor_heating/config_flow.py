@@ -31,6 +31,7 @@ from .const import (
     CONF_OUTDOOR_TEMPERATURE_SENSOR,
     CONF_SENSOR_TIMEOUT,
     CONF_ROOM_COUNT,
+    CONF_SCHEDULE,
     CONF_TEMPERATURE_SENSOR,
     CONF_ZONE_ID,
     CONF_ZONES,
@@ -44,6 +45,10 @@ from .const import (
     NAME,
 )
 from .controller import Settings
+from .schedule import decode_slots, encode_slots, format_slots, parse_slots
+
+# Multiline form field; options keep validated rows under CONF_SCHEDULE. Related: schedule.py.
+SCHEDULE_TEXT = "schedule_text"
 
 
 def _heater_state_supported(entity_id: str, state) -> bool:
@@ -435,10 +440,38 @@ class ControlOptionsFlow(config_entries.OptionsFlow):
             self._options_draft.update({
                 key: candidate.get(key) or None for key in _OPTIONAL_SENSOR_FIELDS
             })
-            return await self.async_step_confirm()
+            return await self.async_step_schedule()
         return self.async_show_form(
             step_id="optional_sensors",
             data_schema=_optional_sensor_schema(self._options_draft),
+            errors=errors,
+        )
+
+    async def async_step_schedule(self, user_input=None):
+        """Edit daily slots, one 'HH:MM temperature [all|weekday|weekend]' per line; related: schedule.py."""
+        errors = {}
+        try:
+            current = format_slots(decode_slots(self._options_draft.get(CONF_SCHEDULE)))
+        except ValueError:
+            current = ""
+        text = current if user_input is None else user_input.get(SCHEDULE_TEXT, "")
+        if user_input is not None:
+            try:
+                slots = parse_slots(text)
+            except ValueError as err:
+                errors[SCHEDULE_TEXT] = str(err)
+            else:
+                runtime = getattr(self.config_entry, "runtime_data", None)
+                if not slots and getattr(runtime, "schedule_enabled", False):
+                    errors[SCHEDULE_TEXT] = "schedule_empty"
+                else:
+                    self._options_draft[CONF_SCHEDULE] = encode_slots(slots)
+                    return await self.async_step_confirm()
+        return self.async_show_form(
+            step_id="schedule",
+            data_schema=vol.Schema({vol.Optional(
+                SCHEDULE_TEXT, description={"suggested_value": text},
+            ): selector.TextSelector(selector.TextSelectorConfig(multiline=True))}),
             errors=errors,
         )
 
@@ -494,7 +527,12 @@ def _optional_sensor_schema(defaults):
 
 def _summary_placeholders(options):
     """Format the draft so the final setup step can display a clear summary."""
+    try:
+        schedule = format_slots(decode_slots(options.get(CONF_SCHEDULE))).replace("\n", ", ") or "—"
+    except ValueError:
+        schedule = "—"
     return {
+        "schedule": schedule,
         **{key: str(options.get(key, "—")) for key in _OPTIONAL_SENSOR_FIELDS},
         **{
             CONF_HOME_TEMPERATURE: str(options[CONF_HOME_TEMPERATURE]),

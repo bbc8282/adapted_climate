@@ -98,9 +98,21 @@
         "data": {
           "outdoor_temperature_sensor": "Outdoor temperature sensor"
         }
+      },
+      "schedule": {
+        "title": "Heating schedule",
+        "description": "Enter one slot per line as `HH:MM temperature [all|weekday|weekend]` (e.g. `06:00 20 weekday`, `21:00 25`). Days default to all. Temperatures 18-30 °C, up to 12 slots. While the HOME preset is active and the schedule switch is on, the target changes at each slot time; a manually set target is kept until the next slot. AUTO starts heating up to 120 minutes before a raising slot when learning evidence is sufficient. Changing only the schedule applies immediately without stopping heating.",
+        "data": {"schedule_text": "Schedule"}
       }
     },
-    "error": {"invalid_setting": "Enter a value within the allowed range. Durations must be whole numbers."}
+    "error": {"invalid_setting": "Enter a value within the allowed range. Durations must be whole numbers.",
+      "schedule_invalid_format": "Enter one slot per line as `HH:MM temperature [all|weekday|weekend]`.",
+      "schedule_invalid_time": "Enter times as HH:MM between 00:00 and 23:59.",
+      "schedule_invalid_temperature": "Enter temperatures between 18 and 30 °C.",
+      "schedule_invalid_days": "Days must be all, weekday or weekend.",
+      "schedule_duplicate_time": "Two slots share the same time on overlapping days.",
+      "schedule_too_many": "Enter at most 12 slots.",
+      "schedule_empty": "The schedule switch is on, so at least one slot is required. Turn the switch off first."}
   },
   "entity": {
     "button": {
@@ -110,7 +122,8 @@
       "peak_observation_hours": {"name": "Peak observation limit"}
     },
     "switch": {
-      "sunrise_saving": {"name": "Sunrise saving"}
+      "sunrise_saving": {"name": "Sunrise saving"},
+      "schedule_enabled": {"name": "Heating schedule"}
     },
     "time": {
       "sunrise_start": {"name": "Sunrise saving start"},

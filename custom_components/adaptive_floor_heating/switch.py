@@ -1,7 +1,8 @@
-"""Expose predictive ON while retaining legacy intent values; related: runtime.py, storage.py, select.py."""
+"""Expose predictive ON, sunrise saving and the daily schedule; related: runtime.py, storage.py, select.py, schedule.py."""
 
 from homeassistant.components.switch import SwitchEntity
 from homeassistant.const import EntityCategory
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 
 from .const import DOMAIN, NAME
@@ -13,6 +14,7 @@ async def async_setup_entry(hass, entry, async_add_entities) -> None:
     async_add_entities([
         PredictionOnSwitch(entry, entry.runtime_data),
         SunriseSavingSwitch(entry, entry.runtime_data),
+        ScheduleSwitch(entry, entry.runtime_data),
     ])
 
 
@@ -81,3 +83,40 @@ class SunriseSavingSwitch(SwitchEntity):
 
     async def async_turn_off(self, **kwargs) -> None:
         self._runtime.set_sunrise_schedule(enabled=False)
+
+
+class ScheduleSwitch(SwitchEntity):
+    """Toggle the daily target schedule; slots are edited in options. Related: runtime.py, config_flow.py."""
+
+    _attr_should_poll = False
+    _attr_has_entity_name = True
+    _attr_translation_key = "schedule_enabled"
+    _attr_icon = "mdi:calendar-clock"
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, entry, runtime) -> None:
+        self._runtime = runtime
+        self._attr_unique_id = f"{entry.entry_id}_schedule_enabled"
+        self.entity_id = entity_id(runtime.hass, entry, "switch", "schedule_enabled")
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, entry.entry_id)}, name=entry.title or NAME,
+            entry_type=DeviceEntryType.SERVICE,
+        )
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self.async_on_remove(self._runtime.subscribe(self.async_write_ha_state))
+        await self._runtime.async_start()
+
+    @property
+    def is_on(self) -> bool:
+        return self._runtime.schedule_enabled
+
+    async def async_turn_on(self, **kwargs) -> None:
+        try:
+            self._runtime.set_schedule_enabled(True)
+        except ValueError as err:
+            raise ServiceValidationError(str(err)) from err
+
+    async def async_turn_off(self, **kwargs) -> None:
+        self._runtime.set_schedule_enabled(False)

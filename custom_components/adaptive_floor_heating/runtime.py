@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 from .actuator import SwitchActuator
 from .const import (
     CLIMATE_OFF_TEMPERATURE, CLIMATE_ON_TEMPERATURE,
-    CONF_HEATER, CONF_MODE, CONF_OUTDOOR_TEMPERATURE_SENSOR,
+    CONF_HEATER, CONF_MODE, CONF_OUTDOOR_TEMPERATURE_SENSOR, CONF_SCHEDULE,
     CONF_TEMPERATURE_SENSOR, CONF_ZONES,
     MIN_PEAK_OBSERVATION_HOURS, MAX_PEAK_OBSERVATION_HOURS,
     MODE_MULTI_ZONE_INTEGRATED, DEFAULT_PREDICTION_MODE,
@@ -26,6 +26,10 @@ from .history import ThermalObservation
 from .storage import RuntimeStore, ThermalLearningStore
 from .thermal_model import ThermalLearningModel
 from .peak_prediction import ForecastCalibration, HYBRID_VERSION, duration_support, forecast as residual_forecast
+from .schedule import (
+    MAX_PREHEAT_LEAD_MINUTES, MIN_SCHEDULE_RUNTIME_SAMPLES, active_slot, decode_slots,
+    format_slots, next_slot, preheat_lead_minutes,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -127,6 +131,18 @@ class HeatingRuntime:
         self.sunrise_enabled = False
         self.sunrise_start = self.sunrise_end = ClockTime()
         self._sunrise_active = False
+        # Daily target slots from options; enable state and boundaries persist in RuntimeStore.
+        # Related: schedule.py, switch.py, config_flow.py, climate.py.
+        try:
+            self.schedule_slots = decode_slots(options.get(CONF_SCHEDULE))
+        except ValueError:
+            _LOGGER.warning("Ignoring invalid heating schedule option")
+            self.schedule_slots = ()
+        self.schedule_enabled = False
+        self._schedule_last_fire: float | None = None
+        self.schedule_override_until: float | None = None
+        self.schedule_preheat: dict | None = None
+        self._schedule_off_target: float | None = None
         self._predictive_stop: PredictiveStop | None = None
         self._sunrise_coast = False
         self.start_prediction = {"status": "insufficient_data", "predicted_minimum": None}
@@ -214,6 +230,12 @@ class HeatingRuntime:
         self.sunrise_enabled = data["sunrise_enabled"]
         self.sunrise_start = ClockTime.fromisoformat(data["sunrise_start"])
         self.sunrise_end = ClockTime.fromisoformat(data["sunrise_end"])
+        # A changed slot list invalidates remembered boundaries and any manual override.
+        same_slots = data.get("schedule_signature") == format_slots(self.schedule_slots)
+        self.schedule_enabled = data.get("schedule_enabled") is True and bool(self.schedule_slots)
+        self._schedule_last_fire = data.get("schedule_last_fire") if same_slots else None
+        self.schedule_override_until = data.get("schedule_override_until") if same_slots else None
+        self._schedule_off_target = None
         self._predictive_stop = None
         self._sunrise_coast = False
         self.curve_tracker = CurveTracker(self.peak_observation_seconds)
@@ -585,13 +607,16 @@ class HeatingRuntime:
         configured = self.actuator.changed_at + self.controller.settings.minimum_off_time
         return max(configured, self._minimum_off_until or configured)
 
+    def _local_zone(self):
+        zone_name = getattr(getattr(self.hass, "config", None), "time_zone", None)
+        return UTC if zone_name in (None, "UTC") else ZoneInfo(zone_name)
+
     # Resolve daily schedule boundaries on the HA local clock; related: time.py, storage.py.
     def _sunrise_window(self, timestamp: float) -> tuple[bool, float | None]:
         start, end = self.sunrise_start, self.sunrise_end
         if not self.sunrise_enabled or start == end:
             return False, None
-        zone_name = getattr(getattr(self.hass, "config", None), "time_zone", None)
-        zone = UTC if zone_name in (None, "UTC") else ZoneInfo(zone_name)
+        zone = self._local_zone()
         local = datetime.fromtimestamp(timestamp, zone)
         clock = local.time()
         active = start <= clock < end if start < end else clock >= start or clock < end
@@ -604,7 +629,138 @@ class HeatingRuntime:
         return active, min(value - timestamp for value in boundaries if value > timestamp)
 
     def _predictive_off_target(self) -> float:
-        return self.controller.target + (0 if self._sunrise_active else self.controller.settings.hot_tolerance)
+        base = self.controller.target + (0 if self._sunrise_active else self.controller.settings.hot_tolerance)
+        return base if self._schedule_off_target is None else min(base, self._schedule_off_target)
+
+    # Daily target schedule: boundaries, manual override and AUTO lookahead; related: schedule.py, climate.py.
+    def _schedule_now(self, timestamp: float) -> datetime:
+        return datetime.fromtimestamp(timestamp, self._local_zone())
+
+    def _schedule_upcoming(self, timestamp: float):
+        """Next boundary that has not already been applied (a pre-heat may apply one early)."""
+        after = max(timestamp, self._schedule_last_fire or timestamp)
+        return next_slot(self.schedule_slots, self._schedule_now(after))
+
+    def _apply_schedule(self, occurrence) -> None:
+        self._schedule_last_fire = occurrence.at.timestamp()
+        self.schedule_override_until = None
+        self._change_target(occurrence.slot.temperature)
+
+    def _schedule_tick(self, wall_now: float) -> float | None:
+        """Apply a due slot and the AUTO pre-heat; return seconds to the next schedule check."""
+        self.schedule_preheat = None
+        off_target, self._schedule_off_target = self._schedule_off_target, None
+        if not self.schedule_enabled or not self.schedule_slots:
+            if off_target is not None:
+                self._clear_runtime_off_schedule()
+            return None
+        if self.schedule_override_until is not None and wall_now >= self.schedule_override_until:
+            self.schedule_override_until = None
+        active = active_slot(self.schedule_slots, self._schedule_now(wall_now))
+        # AWAY skips boundaries without consuming them; set_preset restores the active slot.
+        if (self.preset == "home" and active is not None
+                and (self._schedule_last_fire is None or active.at.timestamp() > self._schedule_last_fire)):
+            self._apply_schedule(active)
+        upcoming = self._schedule_upcoming(wall_now)
+        start_at = None
+        if upcoming is not None:
+            start_at = self._schedule_preheat_check(upcoming, upcoming.at.timestamp(), wall_now)
+            if start_at is True:
+                # The raising slot is now applied; look ahead to the following boundary.
+                start_at, upcoming = None, self._schedule_upcoming(wall_now)
+        if upcoming is None:
+            return None
+        at = upcoming.at.timestamp()
+        self._schedule_off_target = self._schedule_early_stop_target(upcoming, at, wall_now)
+        if self._schedule_off_target != off_target:
+            # Re-plan the reserved runtime cutoff against the new goal, as sunrise saving does.
+            self._clear_runtime_off_schedule()
+        candidates = [at, at - MAX_PREHEAT_LEAD_MINUTES * 60, start_at]
+        return min(value for value in candidates if value is not None and value > wall_now) - wall_now
+
+    def _schedule_preheat_check(self, upcoming, at: float, wall_now: float):
+        """Apply a raising slot early by the learned lead; True when applied, else its start time."""
+        if (self.controller.mode != "auto" or self.preset != "home" or self.prediction_mode == "eco"
+                or self.schedule_override_until is not None or self._learning_reset_pending
+                or upcoming.slot.temperature <= self.controller.target
+                or at - wall_now > MAX_PREHEAT_LEAD_MINUTES * 60):
+            return None
+        temperature = self.controller.temperature
+        info = self.schedule_preheat = {
+            "slot_at": upcoming.at.isoformat(), "temperature": upcoming.slot.temperature,
+            "lead_minutes": None, "start_at": None, "status": "insufficient_evidence",
+        }
+        if temperature is not None and temperature >= upcoming.slot.temperature:
+            info["status"] = "not_needed"
+            return None
+        model = (self.curve_store.model if self.curve_store is not None and not self._curve_storage_failed
+                 else None)
+        lead = preheat_lead_minutes(
+            model, temperature, upcoming.slot.temperature,
+            self._optional_temperature(self.outdoor_sensor, self.hass.loop.time()),
+        )
+        if lead is None:
+            return None
+        start_at = at - lead * 60
+        info.update(lead_minutes=round(lead, 1), status="waiting",
+                    start_at=datetime.fromtimestamp(start_at, upcoming.at.tzinfo).isoformat())
+        if wall_now < start_at:
+            return start_at
+        _LOGGER.info("%s schedule pre-heat for %s (%.0f min lead)", self.heater, info["slot_at"], lead)
+        info["status"] = "started"
+        self._apply_schedule(upcoming)
+        return True
+
+    def _schedule_early_stop_target(self, upcoming, at: float, wall_now: float) -> float | None:
+        """Lower the AUTO OFF goal when a lower slot begins before the learned residual Peak."""
+        cycle = self.curve_tracker.cycle
+        if (self.controller.mode != "auto" or self.preset != "home" or self.schedule_override_until is not None
+                or upcoming.slot.temperature >= self.controller.target or cycle is None
+                or self.curve_store is None or self._curve_storage_failed
+                or len(self.curve_store.model.runtime_samples) < MIN_SCHEDULE_RUNTIME_SAMPLES):
+            return None
+        delay = self.curve_store.model.peak_delay_minutes(cycle.curve_type)
+        if delay is None or at - wall_now > delay * 60:
+            return None
+        return upcoming.slot.temperature + self.controller.settings.hot_tolerance
+
+    def schedule_attributes(self) -> dict:
+        """Expose schedule state for climate attributes; related: climate.py."""
+        if not self.schedule_slots:
+            return {"schedule_enabled": False, "schedule_next": None, "schedule_active_slot": None,
+                    "schedule_override_until": None, "schedule_preheat": None}
+        now = self._schedule_now(time.time())
+        upcoming = next_slot(self.schedule_slots, now) if self.schedule_enabled else None
+        active = active_slot(self.schedule_slots, now) if self.schedule_enabled else None
+        override = self.schedule_override_until
+        return {
+            "schedule_enabled": self.schedule_enabled,
+            "schedule_next": ({"time": upcoming.at.isoformat(), "temperature": upcoming.slot.temperature}
+                              if upcoming else None),
+            "schedule_active_slot": active.slot.as_dict() if active else None,
+            "schedule_override_until": (datetime.fromtimestamp(override, now.tzinfo).isoformat()
+                                        if override is not None else None),
+            "schedule_preheat": self.schedule_preheat,
+        }
+
+    def set_schedule_enabled(self, enabled: bool) -> None:
+        """Enable applies the active slot at once; related: switch.py."""
+        if self.controller.stopping:
+            raise ValueError("The integration is stopping; retry after reload")
+        if enabled and not self.schedule_slots:
+            raise ValueError("Add at least one schedule slot in the integration options first")
+        self.schedule_enabled = enabled
+        self._schedule_last_fire = self.schedule_override_until = None
+        self.evaluate()
+
+    def set_schedule_slots(self, slots) -> None:
+        """Replace slots from saved options without a reload; related: __init__.py."""
+        if self.controller.stopping:
+            raise ValueError("The integration is stopping; retry after reload")
+        self.schedule_slots = tuple(slots)
+        self.schedule_enabled = self.schedule_enabled and bool(self.schedule_slots)
+        self._schedule_last_fire = self.schedule_override_until = None
+        self.evaluate()
 
     @property
     def sunrise_saving_active(self) -> bool:
@@ -703,6 +859,7 @@ class HeatingRuntime:
         self.curve_tracker.advance(time.time())
         self._queue_curve_results()
         self._read_current_temperature(now)
+        schedule_delay = self._schedule_tick(time.time())
         decision = self.controller.decide(
             now, self.actuator.observed, self.actuator.changed_at,
             minimum_off_deadline=self._minimum_off_deadline(),
@@ -771,6 +928,8 @@ class HeatingRuntime:
         deadlines = [now + self.controller.settings.sensor_timeout]
         if sunrise_delay is not None:
             deadlines.append(now + sunrise_delay)
+        if schedule_delay is not None:
+            deadlines.append(now + schedule_delay)
         # Refresh held-state predictive slopes at five-minute boundaries without synthetic reports.
         # Related: history.py advance_time and TemperatureHistory.slope.
         if self.controller.mode == "auto" and self.controller.temperature is not None:
@@ -1551,6 +1710,10 @@ class HeatingRuntime:
             "sunrise_enabled": self.sunrise_enabled,
             "sunrise_start": self.sunrise_start.isoformat(),
             "sunrise_end": self.sunrise_end.isoformat(),
+            "schedule_enabled": self.schedule_enabled,
+            "schedule_signature": format_slots(self.schedule_slots),
+            "schedule_last_fire": self._schedule_last_fire,
+            "schedule_override_until": self.schedule_override_until,
             "last_peak_comparison": self.last_peak_comparison,
             "last_cooling_prediction": self.last_cooling_prediction,
             "prediction_bias": dict(self.prediction_bias),
@@ -1640,17 +1803,25 @@ class HeatingRuntime:
         self._learning_reset_pending = False
 
     def set_target(self, value: float) -> None:
+        """A manual target holds until the next schedule boundary; related: climate.py."""
+        if self._change_target(value) and self.schedule_enabled and self.preset == "home":
+            upcoming = self._schedule_upcoming(time.time())
+            self.schedule_override_until = upcoming.at.timestamp() if upcoming else None
+        self.evaluate()
+
+    def _change_target(self, value: float) -> bool:
         # Preserve measured coast and OFF comparison across target edits; related: climate.py, curve_learning.py, history.py.
         previous = self.controller.target
         self.controller.set_target(value)
-        if self.controller.target != previous:
-            if self.actuator.observed is not False:
-                self.curve_tracker.invalidate("MANUAL_TARGET_CHANGE")
-                self.observation.invalidate_cycle(self.actuator.observed)
-                self._off_predictions = {}
-            self._off_peak_deadlines.clear()
-            self._clear_runtime_off_schedule()
-        self.evaluate()
+        if self.controller.target == previous:
+            return False
+        if self.actuator.observed is not False:
+            self.curve_tracker.invalidate("MANUAL_TARGET_CHANGE")
+            self.observation.invalidate_cycle(self.actuator.observed)
+            self._off_predictions = {}
+        self._off_peak_deadlines.clear()
+        self._clear_runtime_off_schedule()
+        return True
 
     def set_mode(self, mode: str) -> None:
         if self.controller.stopping:
@@ -1692,10 +1863,16 @@ class HeatingRuntime:
             self._off_predictions = {}
         previous_target = self.controller.target
         self.preset = preset
-        self.controller.set_target(
-            self.controller.settings.home_temperature if preset == "home"
-            else self.controller.settings.away_temperature
-        )
+        target = (self.controller.settings.home_temperature if preset == "home"
+                  else self.controller.settings.away_temperature)
+        self.schedule_override_until = None
+        # Returning HOME resumes the active slot instead of the fixed HOME temperature.
+        active = (active_slot(self.schedule_slots, self._schedule_now(time.time()))
+                  if preset == "home" and self.schedule_enabled else None)
+        if active is not None:
+            target = active.slot.temperature
+            self._schedule_last_fire = active.at.timestamp()
+        self.controller.set_target(target)
         if self.controller.target != previous_target:
             # Recalculate the reservation for the new preset target; related: _runtime_cutoff_decision.
             self._clear_runtime_off_schedule()

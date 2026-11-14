@@ -237,6 +237,12 @@ def decode_state(
         "sunrise_enabled": data.get("sunrise_enabled") is True and sunrise_start is not None and sunrise_end is not None,
         "sunrise_start": sunrise_start or "00:00:00",
         "sunrise_end": sunrise_end or "00:00:00",
+        # Optional schedule intent; malformed values only reset the schedule; related: runtime.py, schedule.py.
+        "schedule_enabled": data.get("schedule_enabled") is True,
+        "schedule_signature": data.get("schedule_signature") if isinstance(data.get("schedule_signature"), str) else None,
+        "schedule_last_fire": data.get("schedule_last_fire") if _valid_wall_time(data.get("schedule_last_fire")) else None,
+        "schedule_override_until": (data.get("schedule_override_until")
+                                    if _valid_wall_time(data.get("schedule_override_until")) else None),
         "last_peak_comparison": comparison,
         "last_cooling_prediction": _decode_cooling_prediction(data.get("last_cooling_prediction")),
         "prediction_bias": _decode_prediction_bias(data.get("prediction_bias")),
@@ -278,6 +284,8 @@ class RuntimeStore:
             "preset": "home", "preset_temperature": home_temperature, "faults": [],
             "prediction_mode": DEFAULT_PREDICTION_MODE,
             "sunrise_enabled": False, "sunrise_start": "00:00:00", "sunrise_end": "00:00:00",
+            "schedule_enabled": False, "schedule_signature": None,
+            "schedule_last_fire": None, "schedule_override_until": None,
             "prediction_bias": {model: 0.0 for model in PERSISTED_LEARNING_MODELS},
             "prediction_errors": {model: [] for model in PERSISTED_LEARNING_MODELS},
         }

@@ -1,7 +1,7 @@
 # Adaptive Floor Heating Climate
 
 [![HACS](https://img.shields.io/badge/HACS-Custom-41BDF5.svg?style=for-the-badge)](https://github.com/hacs/integration)
-![version](https://img.shields.io/badge/version-v1.0.0-blue.svg?style=for-the-badge)
+![version](https://img.shields.io/badge/version-v1.1.0-blue.svg?style=for-the-badge)
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20Me-F16061.svg?style=for-the-badge&logo=ko-fi)](https://ko-fi.com/plplaaa2)
 
 Home Assistant용 학습형 바닥난방 Climate 커스텀 통합입니다. 실내 온도 센서와 난방 스위치를 연결해 기본 온도 제어를 제공하며, 운전 이력을 학습해 AUTO 모드에서 난방 시작과 정지를 보조합니다.
@@ -45,6 +45,15 @@ Home Assistant용 학습형 바닥난방 Climate 커스텀 통합입니다. 실�
 ### 일출 절약
 
 **예측 운전 설정 → 일출 절약**을 켜고 시작·종료 시각을 각각 저장합니다. 지정 시간에는 AUTO의 예측 정지 목표가 **설정온도 + 상한 허용 편차**에서 **설정온도**로 내려갑니다. Home Assistant 현지 시각을 따르며, 자정을 넘길 수 있습니다. 두 시각이 같으면 적용하지 않습니다.
+
+### 난방 일정
+
+**설정 → 통합 구성요소 → 옵션**의 마지막 **난방 일정** 단계에서 한 줄에 하나씩 `HH:MM 온도 [all|weekday|weekend]`를 입력하고(예: `06:00 20`, `21:00 25`), **난방 일정** 스위치를 켭니다. 일정만 바꾸면 재시작 없이 바로 적용됩니다.
+
+- 재실(HOME) 프리셋에서 각 시각에 설정온도를 바꿉니다. 시작·재시작·일정 변경 시에는 현재 적용 중인 일정(자정 이전 일정 포함)을 적용합니다.
+- 외출(AWAY) 중에는 일정을 적용하지 않고, 재실로 돌아오면 고정 재실 온도 대신 현재 일정 온도를 사용합니다.
+- 수동으로 바꾼 설정온도는 다음 일정 시각까지 유지됩니다(`schedule_override_until`). 기존 시간 자동화가 설정온도를 바꾸면 수동 변경으로 취급되므로 자동화는 끄세요.
+- AUTO + 예측 ON에서는 온도를 올리는 일정 전에, 학습된 가동시간 곡선으로 계산한 시간만큼(최대 120분) 미리 일정 온도를 적용합니다. 근거가 부족하면 일정 시각에 적용합니다. 온도를 내리는 일정이 학습된 최고점 지연시간 안에 오면 예측 정지가 낮은 일정 온도를 목표로 합니다.
 
 ## 대시보드와 학습
 

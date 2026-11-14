@@ -49,6 +49,8 @@ MIN_PEAK_OBSERVATION_HOURS = 1
 MAX_PEAK_OBSERVATION_HOURS = 12
 CONF_HOME_TEMPERATURE = "home_temperature"
 CONF_AWAY_TEMPERATURE = "away_temperature"
+# Daily target slots stored as [{time, temperature, days}]; related: schedule.py, config_flow.py.
+CONF_SCHEDULE = "schedule_slots"
 # Selectable predictive start strength; related: runtime.py, select.py, storage.py.
 PREDICTION_MODES = ("eco", "balanced", "comfort")
 # Model labels retained in historical forecasts and accuracy records; related: storage.py.
