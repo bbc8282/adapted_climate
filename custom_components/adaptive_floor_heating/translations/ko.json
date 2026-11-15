@@ -12,6 +12,7 @@
         "description": "히터 스위치와 해당 공간의 실내 온도 센서를 선택하세요.",
         "data": {"heater": "히터 스위치", "temperature_sensor": "실내 온도 센서"}
       },
+      "reconfigure": {"title": "난방기·센서 변경", "description": "난방기나 실내 온도 센서를 바꿉니다. 설정, 일정, 학습 데이터는 그대로 유지됩니다.", "data": {"heater": "난방기", "temperature_sensor": "실내 온도 센서"}},
       "multi_zone_integrated": {
         "title": "멀티룸 통합 제어 설정",
         "description": "하나의 Climate로 함께 제어할 방 수를 입력하세요. {min_rooms}~{max_rooms}개까지 설정할 수 있습니다.",
@@ -70,6 +71,8 @@
       "duplicate_heater": "다른 방 또는 통합 설정에서 이미 선택한 스위치입니다. 진행 중인 설정도 확인하세요."
     },
     "abort": {
+      "reconfigure_successful": "난방기와 센서를 변경했습니다.",
+      "reconfigure_unsupported": "단독(standalone) 구성만 변경할 수 있습니다.",
       "invalid_step": "먼저 제어 방식과 방 수를 선택하세요.",
       "entities_changed": "공용 센서 또는 앞서 선택한 방 스위치의 상태나 사용 여부가 변경되었습니다. 엔티티를 확인한 뒤 설정을 다시 시작하세요."
     }

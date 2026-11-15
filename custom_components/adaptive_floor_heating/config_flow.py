@@ -104,6 +104,30 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ):
+        """Swap a standalone entry's heater or room sensor; learning data is kept."""
+        entry = self._get_reconfigure_entry()
+        if entry.data.get(CONF_MODE) != MODE_STANDALONE:
+            return self.async_abort(reason="reconfigure_unsupported")
+        errors = {}
+        if user_input is not None:
+            errors = self._validate_pair(user_input)
+            # The entry's own heater is not a conflict with itself.
+            if (errors.get(CONF_HEATER) == "duplicate_heater"
+                    and user_input.get(CONF_HEATER) == entry.data.get(CONF_HEATER)):
+                errors.pop(CONF_HEATER)
+            if not errors:
+                return self.async_update_reload_and_abort(
+                    entry, data={**entry.data, **self._pair_data(user_input)}
+                )
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=self._pair_schema(user_input or entry.data),
+            errors=errors,
+        )
+
     async def async_step_multi_zone_integrated(
         self, user_input: dict[str, Any] | None = None
     ):
@@ -491,7 +515,8 @@ _HEATING_SETTING_FIELDS = (
     (CONF_HEAT_HOT_TOLERANCE, 0.0, 2.0, 0.1, "°C"),
     (CONF_MIN_ON, 0, 3600, 1, "s"),
     (CONF_MIN_OFF, MIN_CONFIG_MIN_OFF, 3600, 1, "s"),
-    (CONF_SENSOR_TIMEOUT, 60, 3600, 1, "s"),
+    # Up to 3 h: Zigbee sensors and template aggregates may report only on change.
+    (CONF_SENSOR_TIMEOUT, 60, 10800, 1, "s"),
 )
 _PRESET_FIELDS = (
     (CONF_HOME_TEMPERATURE, 18, 30, 0.1, "°C"),

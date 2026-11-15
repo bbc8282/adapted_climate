@@ -376,6 +376,54 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         result = await flow.async_step_heating_settings({"minimum_off_time": 1800})
         self.assertEqual(result["step_id"], "preset_temperatures")
 
+    async def test_options_accept_three_hour_sensor_timeout(self):
+        """Slow-reporting Zigbee or template sensors need timeouts beyond 1 h."""
+        flow = self.flow_module.ConfigFlow.async_get_options_flow(None)
+        flow.config_entry = SimpleNamespace(options={})
+        flow.hass = self.hass
+        result = await flow.async_step_init({"sensor_timeout": 7200})
+        self.assertEqual(result["step_id"], "preset_temperatures")
+        result = await flow.async_step_heating_settings({"sensor_timeout": 10801})
+        self.assertEqual(result["errors"], {"sensor_timeout": "invalid_setting"})
+
+    def reconfigure_flow(self, data):
+        entry = SimpleNamespace(data=data)
+        self.hass.entries.append(entry)
+        flow = self.new_flow("reconfigure")
+        flow._get_reconfigure_entry = lambda: entry
+        flow.async_update_reload_and_abort = lambda e, data: {
+            "type": "abort", "reason": "reconfigure_successful", "entry": e, "data": data,
+        }
+        return flow
+
+    async def test_reconfigure_swaps_sensor_and_keeps_own_heater(self):
+        flow = self.reconfigure_flow({"mode": "standalone", **self.pair(1)})
+        form = await flow.async_step_reconfigure()
+        self.assertEqual(form["step_id"], "reconfigure")
+        result = await flow.async_step_reconfigure(
+            {"heater": "switch.room_1", "temperature_sensor": "sensor.room_2"}
+        )
+        self.assertEqual(result["reason"], "reconfigure_successful")
+        self.assertEqual(result["data"], {
+            "mode": "standalone", "heater": "switch.room_1", "temperature_sensor": "sensor.room_2",
+        })
+
+    async def test_reconfigure_rejects_invalid_sensor_and_foreign_heater(self):
+        self.hass.entries.append(SimpleNamespace(data={"mode": "standalone", **self.pair(3)}))
+        flow = self.reconfigure_flow({"mode": "standalone", **self.pair(1)})
+        self.states["sensor.room_2"].state = "unavailable"
+        result = await flow.async_step_reconfigure(
+            {"heater": "switch.room_3", "temperature_sensor": "sensor.room_2"}
+        )
+        self.assertEqual(result["errors"], {
+            "heater": "duplicate_heater", "temperature_sensor": "entity_unavailable",
+        })
+
+    async def test_reconfigure_refuses_integrated_entries(self):
+        flow = self.reconfigure_flow({"mode": "multi_zone_integrated", "zones": [self.pair(1)]})
+        result = await flow.async_step_reconfigure()
+        self.assertEqual(result, {"type": "abort", "reason": "reconfigure_unsupported"})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -40,7 +40,7 @@ class Settings:
             (CONF_HEAT_HOT_TOLERANCE, 0.0, 2.0, False),
             (CONF_MIN_ON, 0, 3600, True),
             (CONF_MIN_OFF, 0, 3600, True),
-            (CONF_SENSOR_TIMEOUT, 60, 3600, True),
+            (CONF_SENSOR_TIMEOUT, 60, 10800, True),
             (CONF_PEAK_OBSERVATION_HOURS, MIN_PEAK_OBSERVATION_HOURS,
              MAX_PEAK_OBSERVATION_HOURS, True),
             (CONF_HOME_TEMPERATURE, MIN_TARGET, MAX_TARGET, False),

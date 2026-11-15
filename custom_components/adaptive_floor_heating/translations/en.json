@@ -12,6 +12,7 @@
         "description": "Select the heater switch and the indoor temperature sensor for this space.",
         "data": {"heater": "Heater switch", "temperature_sensor": "Indoor temperature sensor"}
       },
+      "reconfigure": {"title": "Change heater or sensor", "description": "Pick a different heater or indoor temperature sensor. Settings, schedule and learned data are kept.", "data": {"heater": "Heater switch", "temperature_sensor": "Indoor temperature sensor"}},
       "multi_zone_integrated": {
         "title": "Integrated multi-room setup",
         "description": "Enter the number of rooms controlled by one Climate entity ({min_rooms}–{max_rooms}).",
@@ -66,6 +67,8 @@
       "duplicate_heater": "This switch is already selected in another room or integration setup, including setups in progress."
     },
     "abort": {
+      "reconfigure_successful": "Heater and sensor updated.",
+      "reconfigure_unsupported": "Only standalone entries can be reconfigured.",
       "invalid_step": "Choose the heating mode and number of rooms first.",
       "entities_changed": "The shared sensor or a previously selected room switch changed availability or ownership. Check the entities and restart setup."
     }
