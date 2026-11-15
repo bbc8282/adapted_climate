@@ -10,6 +10,15 @@ CONF_OUTDOOR_TEMPERATURE_SENSOR = "outdoor_temperature_sensor"
 CONF_ROOM_COUNT = "room_count"
 CONF_ZONES = "zones"
 CONF_ZONE_ID = "zone_id"
+# Standalone measured-temperature rooms stored in entry options as
+# [{name, sensors: [entity_id], occupancy: entity_id | None}]; related: rooms.py, config_flow.py.
+CONF_ROOMS = "rooms"
+CONF_ROOM_NAME = "name"
+CONF_ROOM_SENSORS = "sensors"
+CONF_ROOM_OCCUPANCY = "occupancy"
+MAX_ROOM_SLOTS = 4
+# Blend the measured temperature over 15 minutes when the active-room set changes.
+ROOM_TRANSITION_SECONDS = 900
 
 MODE_STANDALONE = "standalone"
 MODE_MULTI_ZONE = "multi_zone"
@@ -67,3 +76,5 @@ LATCHED_FAULTS = frozenset(
 CLIMATE_ON_TEMPERATURE = 30.0
 CLIMATE_OFF_TEMPERATURE = 10.0
 HEATER_DOMAINS = ("switch", "climate")
+# Curve/observation invalid reason when the measured room set changed; related: runtime.py, frontend/panel.js.
+ROOM_SET_CHANGED = "ROOM_SET_CHANGED"

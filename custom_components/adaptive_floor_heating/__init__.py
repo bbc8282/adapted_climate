@@ -108,6 +108,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def _async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Apply validated settings through a safe unload/reload boundary."""
     from .controller import Settings
+    from .runtime import configured_rooms
     from .schedule import decode_slots
 
     runtime = entry.runtime_data
@@ -121,10 +122,13 @@ async def _async_update_options(hass: HomeAssistant, entry: ConfigEntry) -> None
             )
             if (Settings.from_options(dict(entry.options)) == runtime.controller.settings
                     and optional_sensors_match):
-                # Slot edits apply live, so saving a schedule never stops heating.
+                # Slot and room edits apply live, so saving them never stops heating.
                 slots = decode_slots(entry.options.get(CONF_SCHEDULE))
                 if slots != runtime.schedule_slots:
                     runtime.set_schedule_slots(slots)
+                rooms = configured_rooms(entry)
+                if rooms != runtime.rooms:
+                    runtime.set_rooms(rooms)
                 return
         except ValueError:
             pass

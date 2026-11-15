@@ -31,6 +31,10 @@ from .const import (
     CONF_OUTDOOR_TEMPERATURE_SENSOR,
     CONF_SENSOR_TIMEOUT,
     CONF_ROOM_COUNT,
+    CONF_ROOM_NAME,
+    CONF_ROOM_OCCUPANCY,
+    CONF_ROOM_SENSORS,
+    CONF_ROOMS,
     CONF_SCHEDULE,
     CONF_TEMPERATURE_SENSOR,
     CONF_ZONE_ID,
@@ -38,6 +42,7 @@ from .const import (
     CONTEXT_HEATERS,
     DOMAIN,
     MAX_ROOMS,
+    MAX_ROOM_SLOTS,
     MIN_CONFIG_MIN_OFF,
     MODE_MULTI_ZONE_INTEGRATED,
     MIN_INTEGRATED_ROOMS,
@@ -464,10 +469,29 @@ class ControlOptionsFlow(config_entries.OptionsFlow):
             self._options_draft.update({
                 key: candidate.get(key) or None for key in _OPTIONAL_SENSOR_FIELDS
             })
-            return await self.async_step_schedule()
+            if (getattr(self.config_entry, "data", None) or {}).get(CONF_MODE) == MODE_MULTI_ZONE_INTEGRATED:
+                return await self.async_step_schedule()
+            return await self.async_step_rooms()
         return self.async_show_form(
             step_id="optional_sensors",
             data_schema=_optional_sensor_schema(self._options_draft),
+            errors=errors,
+        )
+
+    async def async_step_rooms(self, user_input=None):
+        """Edit up to four measured rooms; all slots empty keeps the single sensor; related: rooms.py."""
+        errors = {}
+        if user_input is not None:
+            rooms, errors = _parse_rooms(self.hass, user_input)
+            if not errors:
+                self._options_draft[CONF_ROOMS] = rooms
+                return await self.async_step_schedule()
+        return self.async_show_form(
+            step_id="rooms",
+            data_schema=_rooms_schema(
+                user_input if user_input is not None
+                else _room_form_values(self._options_draft.get(CONF_ROOMS))
+            ),
             errors=errors,
         )
 
@@ -550,6 +574,97 @@ def _optional_sensor_schema(defaults):
     )) for key in _OPTIONAL_SENSOR_FIELDS})
 
 
+def _room_key(index: int, field: str) -> str:
+    """Flat form keys: room_1_name, room_1_sensors, room_1_occupancy ... room_4_*."""
+    return f"room_{index}_{field}"
+
+
+def _room_form_values(rooms) -> dict[str, Any]:
+    """Flatten stored rooms into form values for suggested defaults."""
+    values: dict[str, Any] = {}
+    if not isinstance(rooms, list):
+        return values
+    for index, room in enumerate(rooms[:MAX_ROOM_SLOTS], start=1):
+        if not isinstance(room, dict):
+            continue
+        values[_room_key(index, CONF_ROOM_NAME)] = room.get(CONF_ROOM_NAME)
+        values[_room_key(index, CONF_ROOM_SENSORS)] = list(room.get(CONF_ROOM_SENSORS) or [])
+        values[_room_key(index, CONF_ROOM_OCCUPANCY)] = room.get(CONF_ROOM_OCCUPANCY)
+    return values
+
+
+def _rooms_schema(values):
+    """Fixed room slots: name text, multi temperature sensors, optional occupancy binary_sensor."""
+    schema = {}
+    for index in range(1, MAX_ROOM_SLOTS + 1):
+        for field, field_selector in (
+            (CONF_ROOM_NAME, selector.TextSelector(selector.TextSelectorConfig())),
+            (CONF_ROOM_SENSORS, selector.EntitySelector(selector.EntitySelectorConfig(
+                domain="sensor", device_class="temperature", multiple=True))),
+            (CONF_ROOM_OCCUPANCY, selector.EntitySelector(selector.EntitySelectorConfig(
+                domain="binary_sensor"))),
+        ):
+            key = _room_key(index, field)
+            suggested = values.get(key)
+            schema[vol.Optional(key, description={"suggested_value": suggested} if suggested else None)] = field_selector
+    return vol.Schema(schema)
+
+
+def _parse_rooms(hass, data) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """Validate room slots per field; empty slots are skipped, no rooms keeps the single sensor."""
+    rooms, errors, names = [], {}, set()
+    for index in range(1, MAX_ROOM_SLOTS + 1):
+        name_key = _room_key(index, CONF_ROOM_NAME)
+        sensors_key = _room_key(index, CONF_ROOM_SENSORS)
+        occupancy_key = _room_key(index, CONF_ROOM_OCCUPANCY)
+        name = data.get(name_key)
+        name = name.strip() if isinstance(name, str) else name
+        sensors = data.get(sensors_key)
+        if isinstance(sensors, str):
+            sensors = [sensors] if sensors else []
+        occupancy = data.get(occupancy_key) or None
+        if not name and not sensors and occupancy is None:
+            continue
+        if not isinstance(name, str) or not name:
+            errors[name_key] = "room_name_required"
+        elif name in names:
+            errors[name_key] = "duplicate_room_name"
+        names.add(name)
+        if not sensors:
+            errors[sensors_key] = "room_sensors_required"
+        elif not isinstance(sensors, (list, tuple)):
+            errors[sensors_key] = "invalid_entity"
+        else:
+            for entity_id in sensors:
+                error = _validate_temperature_entity(hass, entity_id, sensors_key)
+                if error:
+                    errors.update(error)
+                    break
+        if occupancy is not None:
+            if not isinstance(occupancy, str) or not occupancy.startswith("binary_sensor."):
+                errors[occupancy_key] = "invalid_occupancy"
+            elif hass.states.get(occupancy) is None:
+                errors[occupancy_key] = "invalid_entity"
+        if not errors:
+            rooms.append({CONF_ROOM_NAME: name, CONF_ROOM_SENSORS: list(dict.fromkeys(sensors)),
+                          CONF_ROOM_OCCUPANCY: occupancy})
+    return rooms, errors
+
+
+def _rooms_summary(rooms) -> str:
+    if not isinstance(rooms, list) or not rooms:
+        return "—"
+    parts = []
+    for room in rooms:
+        if not isinstance(room, dict):
+            continue
+        text = f"{room.get(CONF_ROOM_NAME)}: {', '.join(room.get(CONF_ROOM_SENSORS) or [])}"
+        if room.get(CONF_ROOM_OCCUPANCY):
+            text += f" ({room[CONF_ROOM_OCCUPANCY]})"
+        parts.append(text)
+    return "; ".join(parts) or "—"
+
+
 def _summary_placeholders(options):
     """Format the draft so the final setup step can display a clear summary."""
     try:
@@ -558,6 +673,7 @@ def _summary_placeholders(options):
         schedule = "—"
     return {
         "schedule": schedule,
+        CONF_ROOMS: _rooms_summary(options.get(CONF_ROOMS)),
         **{key: str(options.get(key, "—")) for key in _OPTIONAL_SENSOR_FIELDS},
         **{
             CONF_HOME_TEMPERATURE: str(options[CONF_HOME_TEMPERATURE]),

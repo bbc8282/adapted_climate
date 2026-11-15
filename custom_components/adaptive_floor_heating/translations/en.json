@@ -102,6 +102,16 @@
           "outdoor_temperature_sensor": "Outdoor temperature sensor"
         }
       },
+      "rooms": {
+        "title": "Rooms",
+        "description": "Optionally measure up to four rooms instead of the single temperature sensor. Each room averages its temperature sensors that reported within the report gap limit. If any room with an occupancy sensor is occupied, only occupied rooms are used; otherwise all rooms with a recent temperature are averaged. Changes of the active rooms blend over 15 minutes and are excluded from learning. Leave every slot empty to keep the single sensor. Changing only rooms applies immediately without stopping heating.",
+        "data": {
+          "room_1_name": "Room 1 name", "room_1_sensors": "Room 1 temperature sensors", "room_1_occupancy": "Room 1 occupancy sensor (optional)",
+          "room_2_name": "Room 2 name", "room_2_sensors": "Room 2 temperature sensors", "room_2_occupancy": "Room 2 occupancy sensor (optional)",
+          "room_3_name": "Room 3 name", "room_3_sensors": "Room 3 temperature sensors", "room_3_occupancy": "Room 3 occupancy sensor (optional)",
+          "room_4_name": "Room 4 name", "room_4_sensors": "Room 4 temperature sensors", "room_4_occupancy": "Room 4 occupancy sensor (optional)"
+        }
+      },
       "schedule": {
         "title": "Heating schedule",
         "description": "Enter one slot per line as `HH:MM temperature [all|weekday|weekend]` (e.g. `06:00 20 weekday`, `21:00 25`). Days default to all. Temperatures 18-30 °C, up to 12 slots. While the HOME preset is active and the schedule switch is on, the target changes at each slot time; a manually set target is kept until the next slot. AUTO starts heating up to 120 minutes before a raising slot when learning evidence is sufficient. Changing only the schedule applies immediately without stopping heating.",
@@ -115,7 +125,15 @@
       "schedule_invalid_days": "Days must be all, weekday or weekend.",
       "schedule_duplicate_time": "Two slots share the same time on overlapping days.",
       "schedule_too_many": "Enter at most 12 slots.",
-      "schedule_empty": "The schedule switch is on, so at least one slot is required. Turn the switch off first."}
+      "schedule_empty": "The schedule switch is on, so at least one slot is required. Turn the switch off first.",
+      "invalid_entity": "Select an existing entity of the correct type.",
+      "entity_unavailable": "The entity state is unavailable. Restore it before continuing.",
+      "invalid_temperature": "Select a temperature sensor reporting a finite numeric value.",
+      "invalid_unit": "Select a Celsius (°C) or Fahrenheit (°F) sensor.",
+      "room_name_required": "Enter a name for this room.",
+      "duplicate_room_name": "Each room needs a different name.",
+      "room_sensors_required": "Select at least one temperature sensor for this room.",
+      "invalid_occupancy": "Select an existing binary sensor for occupancy."}
   },
   "entity": {
     "button": {

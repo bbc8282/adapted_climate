@@ -13,8 +13,8 @@ from zoneinfo import ZoneInfo
 from .actuator import SwitchActuator
 from .const import (
     CLIMATE_OFF_TEMPERATURE, CLIMATE_ON_TEMPERATURE,
-    CONF_HEATER, CONF_MODE, CONF_OUTDOOR_TEMPERATURE_SENSOR, CONF_SCHEDULE,
-    CONF_TEMPERATURE_SENSOR, CONF_ZONES,
+    CONF_HEATER, CONF_MODE, CONF_OUTDOOR_TEMPERATURE_SENSOR, CONF_ROOMS, CONF_SCHEDULE,
+    CONF_TEMPERATURE_SENSOR, CONF_ZONES, ROOM_SET_CHANGED,
     MIN_PEAK_OBSERVATION_HOURS, MAX_PEAK_OBSERVATION_HOURS,
     MODE_MULTI_ZONE_INTEGRATED, DEFAULT_PREDICTION_MODE,
     HEATER_UNAVAILABLE_DELAY, PREDICTION_MODES, OFF_MODELS,
@@ -23,6 +23,7 @@ from .controller import Decision, Settings, ThermostatController, temperature_ce
 from .curve_learning import CurveCycle, CurveStandards, CurveTracker, BUCKET_SECONDS
 from .curve_storage import CurveStore
 from .history import ThermalObservation
+from .rooms import Room, RoomAggregator, decode_rooms
 from .storage import RuntimeStore, ThermalLearningStore
 from .thermal_model import ThermalLearningModel
 from .peak_prediction import ForecastCalibration, HYBRID_VERSION, duration_support, forecast as residual_forecast
@@ -43,6 +44,17 @@ class PredictiveStop:
     forecast: dict
     sunrise_saving: bool
 
+
+
+def configured_rooms(entry) -> tuple[Room, ...]:
+    """Standalone option rooms; empty keeps the single data sensor (integrated mode never uses rooms)."""
+    if entry.data.get(CONF_MODE) == MODE_MULTI_ZONE_INTEGRATED:
+        return ()
+    try:
+        return decode_rooms(entry.options.get(CONF_ROOMS))
+    except ValueError:
+        _LOGGER.warning("Ignoring invalid room option; using the single temperature sensor")
+        return ()
 
 
 def climate_setpoint(state, heating: bool) -> float:
@@ -104,6 +116,9 @@ class HeatingRuntime:
         self._minimum_off_until: float | None = None
         self.sensor = entry.data[CONF_TEMPERATURE_SENSOR]
         self.temperature_last_reported = None
+        # Optional rooms replace the single sensor as the measured temperature; related: rooms.py.
+        self.rooms = configured_rooms(entry)
+        self.room_aggregator: RoomAggregator | None = None
         options = entry.options
         self.outdoor_sensor = options.get(CONF_OUTDOOR_TEMPERATURE_SENSOR)
         # Subscribe only to supported outdoor input; ignore retired pipe options.
@@ -272,8 +287,12 @@ class HeatingRuntime:
         self.started = True
         now = self.hass.loop.time()
         self._curve_cleanup_at = now + 24 * 3600
-        initial_sensor_state = self.hass.states.get(self.sensor)
-        self.temperature_last_reported = getattr(initial_sensor_state, "last_reported", None)
+        self.room_aggregator = None
+        if self.rooms:
+            self._seed_rooms(now)
+        else:
+            initial_sensor_state = self.hass.states.get(self.sensor)
+            self.temperature_last_reported = getattr(initial_sensor_state, "last_reported", None)
         for entity_id in self._optional_sensors:
             self._optional_reported_at[entity_id] = (
                 now if self._temperature(self.hass.states.get(entity_id)) is not None
@@ -282,8 +301,13 @@ class HeatingRuntime:
 
         @callback
         def event_filter(data):
-            return data.get("entity_id") in (
-                *self.heaters, self.sensor, *self._optional_sensors
+            entity_id = data.get("entity_id")
+            rooms = self.room_aggregator
+            if rooms is not None and entity_id in rooms.entities:
+                return True
+            return entity_id in (
+                *self.heaters, *self._optional_sensors,
+                *((self.sensor,) if rooms is None else ()),
             )
 
         @callback
@@ -333,7 +357,10 @@ class HeatingRuntime:
             self._mark_heater_unavailable(now)
         if len(self.heaters) > 1 and observed is not False:
             self.actuator.request(False, retry=True, force=True)
-        initial_temperature = self._temperature(self.hass.states.get(self.sensor))
+        initial_temperature = (
+            self.room_aggregator.temperature if self.room_aggregator is not None
+            else self._temperature(self.hass.states.get(self.sensor))
+        )
         self.curve_tracker.seed(observed, initial_temperature, time.time(), confirmed_off_at=confirmed_off_at)
         self.controller.report_temperature(initial_temperature, self.hass.loop.time())
         self.evaluate()
@@ -374,30 +401,21 @@ class HeatingRuntime:
                 self.curve_tracker.report_cooling_outdoor(
                     wall_now, self._temperature(state), wall_now + self.controller.settings.sensor_timeout
                 )
-        if entity_id == self.sensor:
+        rooms = self.room_aggregator
+        if rooms is not None and entity_id in rooms.entities:
+            if entity_id in rooms.occupancy_sensors:
+                # Occupancy only reselects rooms; it is not a temperature report.
+                rooms.report_occupancy(entity_id, getattr(state, "state", None))
+                self._refresh_rooms(now)
+            else:
+                # Any fresh room sensor report is a report of the aggregate.
+                rooms.report_sensor(entity_id, self._temperature(state), now)
+                if self._temperature(state) is not None:
+                    self.temperature_last_reported = getattr(state, "last_reported", None)
+                self._consume_temperature(self._refresh_rooms(now), now)
+        elif entity_id == self.sensor and rooms is None:
             self.temperature_last_reported = getattr(state, "last_reported", None)
-            temperature = self._temperature(state)
-            self.curve_tracker.report_temperature(temperature, time.time())
-            self._queue_curve_results()
-            if temperature is None:
-                self._off_predictions = {}
-                self._off_peak_deadlines = {}
-                self._off_diagnostic_at = None
-            completed_cycles = self.observation.completed_cycles
-            observed_off_at = self.observation.off_at
-            self.observation.report_temperature(temperature, now)
-            if (self.observation.completed_cycles > completed_cycles
-                    and not self._learning_reset_pending and not self._sunrise_coast):
-                actual_peak = self.observation.last_cycle.peak_temperature
-                if actual_peak is not None:
-                    off_at = self._off_diagnostic_at
-                    if off_at is None and observed_off_at is not None:
-                        off_at = time.time() - (now - observed_off_at)
-                    peak_at = (off_at + self.observation.last_cycle.peak_delay_minutes * 60
-                               if off_at is not None else None)
-                    self._record_peak_comparison(actual_peak, off_at, peak_at)
-                self.thermal_model.add_cycle(self.observation.last_cycle)
-                self.learning_store.schedule(self.thermal_model.snapshot())
+            self._consume_temperature(self._temperature(state), now)
         else:
             if entity_id not in self._heater_states:
                 self._notify()
@@ -591,6 +609,103 @@ class HeatingRuntime:
                     and self.controller.mode != "off"):
                 self.actuator.request(False, retry=True)
         self.evaluate()
+
+    def _consume_temperature(self, temperature: float | None, now: float) -> None:
+        """Feed one measured report to curve and thermal observation learning."""
+        self.curve_tracker.report_temperature(temperature, time.time())
+        self._queue_curve_results()
+        if temperature is None:
+            self._off_predictions = {}
+            self._off_peak_deadlines = {}
+            self._off_diagnostic_at = None
+        completed_cycles = self.observation.completed_cycles
+        observed_off_at = self.observation.off_at
+        self.observation.report_temperature(temperature, now)
+        if (self.observation.completed_cycles > completed_cycles
+                and not self._learning_reset_pending and not self._sunrise_coast):
+            actual_peak = self.observation.last_cycle.peak_temperature
+            if actual_peak is not None:
+                off_at = self._off_diagnostic_at
+                if off_at is None and observed_off_at is not None:
+                    off_at = time.time() - (now - observed_off_at)
+                peak_at = (off_at + self.observation.last_cycle.peak_delay_minutes * 60
+                           if off_at is not None else None)
+                self._record_peak_comparison(actual_peak, off_at, peak_at)
+            self.thermal_model.add_cycle(self.observation.last_cycle)
+            self.learning_store.schedule(self.thermal_model.snapshot())
+
+    # Room aggregation and learning hygiene; related: rooms.py, climate.py, config_flow.py.
+    def _seed_rooms(self, now: float, previous: float | None = None) -> None:
+        """Build the aggregator from current HA states, ageing reports by HA's last_reported."""
+        rooms = self.room_aggregator = RoomAggregator(self.rooms, self.controller.settings.sensor_timeout)
+        wall_now = time.time()
+        latest = None
+        for entity_id in rooms.sensors:
+            state = self.hass.states.get(entity_id)
+            reported = getattr(state, "last_reported", None)
+            reported_at = now
+            if isinstance(reported, datetime):
+                reported_at = now - max(0.0, wall_now - reported.timestamp())
+                latest = reported if latest is None or reported > latest else latest
+            rooms.report_sensor(entity_id, self._temperature(state), reported_at)
+        for entity_id in rooms.occupancy_sensors:
+            rooms.report_occupancy(entity_id, getattr(self.hass.states.get(entity_id), "state", None))
+        self.temperature_last_reported = latest
+        if previous is not None:
+            # A live room edit blends from the value shown before the edit.
+            rooms.active_rooms, rooms.temperature = (), previous
+        rooms.update(now)
+
+    def _refresh_rooms(self, now: float) -> float | None:
+        """Re-aggregate at ``now``; exclude learning while the room set changes or blends."""
+        rooms = self.room_aggregator
+        if rooms.update(now) or rooms.blending(now):
+            self._exclude_room_transition()
+        return rooms.temperature
+
+    def _exclude_room_transition(self) -> None:
+        """Mark the current curve cycle and abort the thermal observation window."""
+        cycle = self.curve_tracker.cycle
+        if cycle is not None and not cycle.invalid_reason:
+            cycle.invalid_reason = ROOM_SET_CHANGED
+        self.observation.invalidate_cycle(self.actuator.observed)
+
+    def set_rooms(self, rooms) -> None:
+        """Apply edited rooms without a reload; the change itself is excluded from learning."""
+        if self.controller.stopping:
+            raise ValueError("The integration is stopping; retry after reload")
+        self.rooms = tuple(rooms)
+        self.room_aggregator = None
+        if not self.started:
+            return
+        now = self.hass.loop.time()
+        if self.rooms:
+            self._seed_rooms(now, previous=self.controller.temperature)
+        else:
+            self.temperature_last_reported = getattr(self.hass.states.get(self.sensor), "last_reported", None)
+        self._exclude_room_transition()
+        self.evaluate()
+
+    def room_attributes(self) -> dict:
+        """Expose per-room temperatures, the active set and blend end; related: climate.py."""
+        rooms = self.room_aggregator
+        if rooms is None and self.rooms:                    # configured but not started yet
+            return {"room_temperatures": {room.name: None for room in self.rooms},
+                    "active_rooms": [], "room_blend_until": None}
+        if rooms is None:
+            temperature = self._temperature(self.hass.states.get(self.sensor))
+            return {"room_temperatures": {self.sensor: temperature},
+                    "active_rooms": [self.sensor] if temperature is not None else [],
+                    "room_blend_until": None}
+        now = self.hass.loop.time()
+        until = rooms.blend_until if rooms.blending(now) else None
+        return {
+            "room_temperatures": {name: (round(value, 2) if value is not None else None)
+                                  for name, value in rooms.room_temperatures(now).items()},
+            "active_rooms": list(rooms.active_rooms or ()),
+            "room_blend_until": (datetime.fromtimestamp(time.time() + until - now, self._local_zone()).isoformat()
+                                 if until is not None else None),
+        }
 
     def _optional_temperature(self, entity_id: str | None, now: float) -> float | None:
         """Read a selected learning sensor only after a recent valid HA report."""
@@ -936,6 +1051,11 @@ class HeatingRuntime:
             deadlines.append((int(now // 300) + 1) * 300)
         if self._heater_unavailable_started is not None:
             deadlines.append(self._heater_unavailable_started + HEATER_UNAVAILABLE_DELAY)
+        # Expire stale room sensors and advance a running blend without new reports.
+        if self.room_aggregator is not None:
+            room_deadline = self.room_aggregator.next_deadline(now)
+            if room_deadline is not None:
+                deadlines.append(room_deadline)
         if self.curve_store is not None:
             deadlines.append(self._curve_cleanup_at)
         cycle = self.curve_tracker.cycle
@@ -1555,7 +1675,10 @@ class HeatingRuntime:
 
     def _read_current_temperature(self, now: float) -> None:
         """Read HA state for control without inventing history.py learning samples."""
-        temperature = self._temperature(self.hass.states.get(self.sensor))
+        temperature = (
+            self._refresh_rooms(now) if self.room_aggregator is not None
+            else self._temperature(self.hass.states.get(self.sensor))
+        )
         self.controller.temperature = temperature
         self.controller.last_report = now if temperature is not None else None
         self.controller.sensor_fault = temperature is None

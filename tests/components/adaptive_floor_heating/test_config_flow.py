@@ -236,6 +236,8 @@ class ConfigFlowTests(unittest.IsolatedAsyncioTestCase):
         result = await flow.async_step_preset_temperatures({"home_temperature": 24, "away_temperature": 19})
         self.assertEqual(result["step_id"], "optional_sensors")
         result = await flow.async_step_optional_sensors({"outdoor_temperature_sensor": "sensor.room_3"})
+        self.assertEqual(result["step_id"], "rooms")
+        result = await flow.async_step_rooms({})
         self.assertEqual(result["step_id"], "schedule")
         result = await flow.async_step_schedule({"schedule_text": "06:00 20 weekday\n21:00 25"})
         self.assertEqual(result["step_id"], "confirm")

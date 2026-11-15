@@ -1509,7 +1509,7 @@ class AdaptiveFloorHeatingPanel extends HTMLElement {
     return ({ACCEPTED:"품질 조건을 통과해 학습에 반영했습니다.",INCOMPLETE_PEAK:"실제 최고점을 확정하지 못했습니다.",
       SENSOR_UNAVAILABLE:"관측 중 실내 온도 센서를 사용할 수 없었습니다.",HEATER_UNAVAILABLE:"관측 중 히터 상태를 확인할 수 없었습니다.",
       MANUAL_TARGET_CHANGE:"관측 중 사용자가 목표온도를 변경했습니다.",MANUAL_MODE_CHANGE:"관측 중 사용자가 운전 모드를 변경했습니다.",
-      MANUAL_PRESET_CHANGE:"관측 중 재실·외출 프리셋이 변경되었습니다.",EXTERNAL_OVERRIDE:"외부 히터 조작으로 관측이 무효화되었습니다.",
+      MANUAL_PRESET_CHANGE:"관측 중 재실·외출 프리셋이 변경되었습니다.",EXTERNAL_OVERRIDE:"외부 히터 조작으로 관측이 무효화되었습니다.",ROOM_SET_CHANGED:"관측 중 측정 방 구성이 바뀌어 학습에서 제외합니다.",
       RELOAD_OR_SHUTDOWN:"통합 재로드 또는 종료로 관측이 중단되었습니다.",HA_SHUTDOWN:"Home Assistant 종료로 관측이 중단되었습니다.",
       OBSERVATION_OVERFLOW:"온도 관측 기록의 최대 개수를 초과했습니다.",AWAY_CYCLE:"외출 프리셋의 사이클은 학습에서 제외합니다.",
       INSUFFICIENT_BUCKETS:"유효한 5분 버킷이 2개 미만입니다.",INVALID_RESIDUAL_RISE:"잔열 상승량이 허용 범위를 벗어나거나 측정되지 않았습니다.",
