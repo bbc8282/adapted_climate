@@ -152,7 +152,7 @@ class AggregatorTests(unittest.TestCase):
         rooms.update(0)
         self.assertAlmostEqual(rooms.temperature, 20.1)
         rooms.report_occupancy("binary_sensor.living", "on")
-        self.assertFalse(rooms.update(10))                         # 20.1 -> 20.2: below 0.3 °C
+        self.assertFalse(rooms.update(10))                         # 20.1 -> 20.2: within 0.4 °C
         self.assertEqual(rooms.active_rooms, ("living",))
         self.assertAlmostEqual(rooms.temperature, 20.2)
         self.assertFalse(rooms.blending(10))

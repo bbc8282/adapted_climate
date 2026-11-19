@@ -27,7 +27,7 @@ DEFAULT_OCCUPANCY_DWELL_MINUTES = 10
 MAX_OCCUPANCY_DWELL_MINUTES = 120
 # A room-set switch that moves the reference less than this (°C) neither blends
 # nor excludes the running cycle from learning.
-ROOM_SWITCH_MIN_DELTA = 0.3
+ROOM_SWITCH_MIN_DELTA = 0.4
 
 MODE_STANDALONE = "standalone"
 MODE_MULTI_ZONE = "multi_zone"

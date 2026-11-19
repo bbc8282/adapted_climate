@@ -6,7 +6,7 @@ as occupied only after its occupancy sensor stayed ``on`` for the dwell time and
 stops counting only after it stayed off for the dwell time. A change of the
 active-room set blends linearly from the last displayed value to the new
 aggregate over ``ROOM_TRANSITION_SECONDS``, unless it moves the reference by
-less than ``ROOM_SWITCH_MIN_DELTA`` (then it applies at once and is not reported
+at most ``ROOM_SWITCH_MIN_DELTA`` (then it applies at once and is not reported
 as a learning-relevant change). ``update(hold=True)`` keeps the current set
 while the heater runs; the selected set is kept as ``pending_rooms``.
 """
@@ -184,7 +184,7 @@ class RoomAggregator:
         significant = False
         if changed:
             if (self.temperature is not None and target is not None
-                    and abs(target - self.temperature) < self.min_delta):
+                    and abs(target - self.temperature) <= self.min_delta + 1e-9):
                 # A small step is applied directly: no blend, learning continues.
                 self._blend_from = self._blend_started = None
             elif self.temperature is not None and target is not None:
