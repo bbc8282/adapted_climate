@@ -12,6 +12,7 @@ CONF_ZONES = "zones"
 CONF_ZONE_ID = "zone_id"
 # Standalone measured-temperature rooms stored in entry options as
 # [{name, sensors: [entity_id], occupancy: entity_id | None}]; related: rooms.py, config_flow.py.
+# The occupancy dwell below is a separate top-level option applied live like rooms.
 CONF_ROOMS = "rooms"
 CONF_ROOM_NAME = "name"
 CONF_ROOM_SENSORS = "sensors"
@@ -19,6 +20,14 @@ CONF_ROOM_OCCUPANCY = "occupancy"
 MAX_ROOM_SLOTS = 4
 # Blend the measured temperature over 15 minutes when the active-room set changes.
 ROOM_TRANSITION_SECONDS = 900
+# A room counts as occupied only after its sensor stayed on (and stops after it
+# stayed off) this many minutes; brief occupancy flicker never reselects rooms.
+CONF_OCCUPANCY_DWELL = "occupancy_dwell_minutes"
+DEFAULT_OCCUPANCY_DWELL_MINUTES = 10
+MAX_OCCUPANCY_DWELL_MINUTES = 120
+# A room-set switch that moves the reference less than this (°C) neither blends
+# nor excludes the running cycle from learning.
+ROOM_SWITCH_MIN_DELTA = 0.3
 
 MODE_STANDALONE = "standalone"
 MODE_MULTI_ZONE = "multi_zone"

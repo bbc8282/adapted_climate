@@ -28,6 +28,7 @@ from .const import (
     CONF_MODE,
     CONF_MIN_OFF,
     CONF_MIN_ON,
+    CONF_OCCUPANCY_DWELL,
     CONF_OUTDOOR_TEMPERATURE_SENSOR,
     CONF_SENSOR_TIMEOUT,
     CONF_ROOM_COUNT,
@@ -40,7 +41,9 @@ from .const import (
     CONF_ZONE_ID,
     CONF_ZONES,
     CONTEXT_HEATERS,
+    DEFAULT_OCCUPANCY_DWELL_MINUTES,
     DOMAIN,
+    MAX_OCCUPANCY_DWELL_MINUTES,
     MAX_ROOMS,
     MAX_ROOM_SLOTS,
     MIN_CONFIG_MIN_OFF,
@@ -481,16 +484,22 @@ class ControlOptionsFlow(config_entries.OptionsFlow):
     async def async_step_rooms(self, user_input=None):
         """Edit up to four measured rooms; all slots empty keeps the single sensor; related: rooms.py."""
         errors = {}
+        dwell = _occupancy_dwell(self._options_draft)
         if user_input is not None:
             rooms, errors = _parse_rooms(self.hass, user_input)
+            dwell = user_input.get(CONF_OCCUPANCY_DWELL, dwell)
+            if not _valid_occupancy_dwell(dwell):
+                errors[CONF_OCCUPANCY_DWELL] = "invalid_setting"
             if not errors:
                 self._options_draft[CONF_ROOMS] = rooms
+                self._options_draft[CONF_OCCUPANCY_DWELL] = int(dwell)
                 return await self.async_step_schedule()
         return self.async_show_form(
             step_id="rooms",
             data_schema=_rooms_schema(
                 user_input if user_input is not None
-                else _room_form_values(self._options_draft.get(CONF_ROOMS))
+                else _room_form_values(self._options_draft.get(CONF_ROOMS)),
+                dwell if _valid_occupancy_dwell(dwell) else DEFAULT_OCCUPANCY_DWELL_MINUTES,
             ),
             errors=errors,
         )
@@ -593,8 +602,19 @@ def _room_form_values(rooms) -> dict[str, Any]:
     return values
 
 
-def _rooms_schema(values):
-    """Fixed room slots: name text, multi temperature sensors, optional occupancy binary_sensor."""
+def _occupancy_dwell(options) -> Any:
+    """Stored occupancy dwell minutes; entries saved before the option use the default."""
+    return options.get(CONF_OCCUPANCY_DWELL, DEFAULT_OCCUPANCY_DWELL_MINUTES)
+
+
+def _valid_occupancy_dwell(value) -> bool:
+    return (not isinstance(value, bool) and isinstance(value, (int, float)) and isfinite(value)
+            and value == int(value) and 0 <= value <= MAX_OCCUPANCY_DWELL_MINUTES)
+
+
+def _rooms_schema(values, dwell=DEFAULT_OCCUPANCY_DWELL_MINUTES):
+    """Fixed room slots: name text, multi temperature sensors, optional occupancy binary_sensor;
+    then the shared occupancy dwell in minutes (0 = react at once)."""
     schema = {}
     for index in range(1, MAX_ROOM_SLOTS + 1):
         for field, field_selector in (
@@ -607,6 +627,12 @@ def _rooms_schema(values):
             key = _room_key(index, field)
             suggested = values.get(key)
             schema[vol.Optional(key, description={"suggested_value": suggested} if suggested else None)] = field_selector
+    schema[vol.Required(CONF_OCCUPANCY_DWELL, default=dwell)] = selector.NumberSelector(
+        selector.NumberSelectorConfig(
+            min=0, max=MAX_OCCUPANCY_DWELL_MINUTES, step=1, unit_of_measurement="min",
+            mode=selector.NumberSelectorMode.BOX,
+        )
+    )
     return vol.Schema(schema)
 
 
@@ -674,6 +700,7 @@ def _summary_placeholders(options):
     return {
         "schedule": schedule,
         CONF_ROOMS: _rooms_summary(options.get(CONF_ROOMS)),
+        CONF_OCCUPANCY_DWELL: str(_occupancy_dwell(options)),
         **{key: str(options.get(key, "—")) for key in _OPTIONAL_SENSOR_FIELDS},
         **{
             CONF_HOME_TEMPERATURE: str(options[CONF_HOME_TEMPERATURE]),

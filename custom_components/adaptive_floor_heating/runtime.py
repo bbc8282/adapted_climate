@@ -13,8 +13,9 @@ from zoneinfo import ZoneInfo
 from .actuator import SwitchActuator
 from .const import (
     CLIMATE_OFF_TEMPERATURE, CLIMATE_ON_TEMPERATURE,
-    CONF_HEATER, CONF_MODE, CONF_OUTDOOR_TEMPERATURE_SENSOR, CONF_ROOMS, CONF_SCHEDULE,
-    CONF_TEMPERATURE_SENSOR, CONF_ZONES, ROOM_SET_CHANGED,
+    CONF_HEATER, CONF_MODE, CONF_OCCUPANCY_DWELL, CONF_OUTDOOR_TEMPERATURE_SENSOR, CONF_ROOMS, CONF_SCHEDULE,
+    CONF_TEMPERATURE_SENSOR, CONF_ZONES, DEFAULT_OCCUPANCY_DWELL_MINUTES, MAX_OCCUPANCY_DWELL_MINUTES,
+    ROOM_SET_CHANGED,
     MIN_PEAK_OBSERVATION_HOURS, MAX_PEAK_OBSERVATION_HOURS,
     MODE_MULTI_ZONE_INTEGRATED, DEFAULT_PREDICTION_MODE,
     HEATER_UNAVAILABLE_DELAY, PREDICTION_MODES, OFF_MODELS,
@@ -55,6 +56,15 @@ def configured_rooms(entry) -> tuple[Room, ...]:
     except ValueError:
         _LOGGER.warning("Ignoring invalid room option; using the single temperature sensor")
         return ()
+
+
+def configured_occupancy_dwell(entry) -> float:
+    """Occupancy dwell in seconds from options; missing or invalid values use the default."""
+    value = entry.options.get(CONF_OCCUPANCY_DWELL, DEFAULT_OCCUPANCY_DWELL_MINUTES)
+    if (isinstance(value, bool) or not isinstance(value, (int, float)) or not isfinite(value)
+            or not 0 <= value <= MAX_OCCUPANCY_DWELL_MINUTES):
+        value = DEFAULT_OCCUPANCY_DWELL_MINUTES
+    return float(value) * 60
 
 
 def climate_setpoint(state, heating: bool) -> float:
@@ -119,6 +129,7 @@ class HeatingRuntime:
         # Optional rooms replace the single sensor as the measured temperature; related: rooms.py.
         self.rooms = configured_rooms(entry)
         self.room_aggregator: RoomAggregator | None = None
+        self.occupancy_dwell = configured_occupancy_dwell(entry)
         options = entry.options
         self.outdoor_sensor = options.get(CONF_OUTDOOR_TEMPERATURE_SENSOR)
         # Subscribe only to supported outdoor input; ignore retired pipe options.
@@ -405,7 +416,7 @@ class HeatingRuntime:
         if rooms is not None and entity_id in rooms.entities:
             if entity_id in rooms.occupancy_sensors:
                 # Occupancy only reselects rooms; it is not a temperature report.
-                rooms.report_occupancy(entity_id, getattr(state, "state", None))
+                rooms.report_occupancy(entity_id, getattr(state, "state", None), now)
                 self._refresh_rooms(now)
             else:
                 # Any fresh room sensor report is a report of the aggregate.
@@ -637,7 +648,8 @@ class HeatingRuntime:
     # Room aggregation and learning hygiene; related: rooms.py, climate.py, config_flow.py.
     def _seed_rooms(self, now: float, previous: float | None = None) -> None:
         """Build the aggregator from current HA states, ageing reports by HA's last_reported."""
-        rooms = self.room_aggregator = RoomAggregator(self.rooms, self.controller.settings.sensor_timeout)
+        rooms = self.room_aggregator = RoomAggregator(
+            self.rooms, self.controller.settings.sensor_timeout, occupancy_dwell=self.occupancy_dwell)
         wall_now = time.time()
         latest = None
         for entity_id in rooms.sensors:
@@ -649,7 +661,8 @@ class HeatingRuntime:
                 latest = reported if latest is None or reported > latest else latest
             rooms.report_sensor(entity_id, self._temperature(state), reported_at)
         for entity_id in rooms.occupancy_sensors:
-            rooms.report_occupancy(entity_id, getattr(self.hass.states.get(entity_id), "state", None))
+            # The first report counts at once: HA restores last_changed at startup, so it cannot age the dwell.
+            rooms.report_occupancy(entity_id, getattr(self.hass.states.get(entity_id), "state", None), now)
         self.temperature_last_reported = latest
         if previous is not None:
             # A live room edit blends from the value shown before the edit.
@@ -659,9 +672,34 @@ class HeatingRuntime:
     def _refresh_rooms(self, now: float) -> float | None:
         """Re-aggregate at ``now``; exclude learning while the room set changes or blends."""
         rooms = self.room_aggregator
-        if rooms.update(now) or rooms.blending(now):
+        if rooms.update(now, hold=self._room_reference_frozen()) or rooms.blending(now):
             self._exclude_room_transition()
         return rooms.temperature
+
+    def _room_reference_frozen(self) -> bool:
+        """Keep the room set while heating runs and until its post-OFF peak is confirmed.
+
+        A set change during that window would exclude the cycle from learning, so it
+        waits as ``pending_rooms``; the window ends at the confirmed peak or the peak
+        observation limit (the curve cycle then leaves the post-heat phase).
+        """
+        if self.actuator.observed is True or self.actuator.pending is True:
+            return True
+        cycle = self.curve_tracker.cycle
+        if (cycle is not None and cycle.off_at is not None and cycle.peak_at is None
+                and not cycle.invalid_reason):
+            return True
+        # The thermal model confirms its own peak; bound by the observation limit without reports.
+        off_at = self.observation.off_at
+        return (self.observation.heater_state is False and off_at is not None
+                and self.hass.loop.time() - off_at < self.peak_observation_seconds)
+
+    def set_occupancy_dwell(self, seconds: float) -> None:
+        """Apply an edited occupancy dwell without a reload; related: __init__.py."""
+        self.occupancy_dwell = float(seconds)
+        if self.room_aggregator is not None and self.started:
+            self.room_aggregator.set_occupancy_dwell(self.occupancy_dwell, self.hass.loop.time())
+            self.evaluate()
 
     def _exclude_room_transition(self) -> None:
         """Mark the current curve cycle and abort the thermal observation window."""
@@ -691,18 +729,20 @@ class HeatingRuntime:
         rooms = self.room_aggregator
         if rooms is None and self.rooms:                    # configured but not started yet
             return {"room_temperatures": {room.name: None for room in self.rooms},
-                    "active_rooms": [], "room_blend_until": None}
+                    "active_rooms": [], "pending_rooms": None, "room_blend_until": None}
         if rooms is None:
             temperature = self._temperature(self.hass.states.get(self.sensor))
             return {"room_temperatures": {self.sensor: temperature},
                     "active_rooms": [self.sensor] if temperature is not None else [],
-                    "room_blend_until": None}
+                    "pending_rooms": None, "room_blend_until": None}
         now = self.hass.loop.time()
         until = rooms.blend_until if rooms.blending(now) else None
         return {
             "room_temperatures": {name: (round(value, 2) if value is not None else None)
                                   for name, value in rooms.room_temperatures(now).items()},
             "active_rooms": list(rooms.active_rooms or ()),
+            # Selected set held back while heating runs; related: _room_reference_frozen.
+            "pending_rooms": list(rooms.pending_rooms) if rooms.pending_rooms is not None else None,
             "room_blend_until": (datetime.fromtimestamp(time.time() + until - now, self._local_zone()).isoformat()
                                  if until is not None else None),
         }

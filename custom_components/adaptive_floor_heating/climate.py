@@ -36,6 +36,16 @@ class AdaptiveFloorHeatingClimate(ClimateEntity):
         ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.TURN_ON
         | ClimateEntityFeature.TURN_OFF | ClimateEntityFeature.PRESET_MODE
     )
+    # Keep large, live-only diagnostics out of Recorder; the live state still carries them.
+    # The panel reads current_temperature/temperature/heater_confirmed_on and the prediction
+    # export reads off_prediction/last_off_prediction/last_peak_comparison/runtime_off_plan
+    # from history, so those stay recorded. Related: frontend/panel.js loadHistory, compactPredictionHistory.
+    _unrecorded_attributes = frozenset({
+        "heating_curve_preview", "learning_summary", "curve_memory", "curve_learning_counts",
+        "curve_rejected_counts", "runtime_learning_samples", "start_prediction",
+        "last_cooling_prediction", "room_temperatures", "pending_rooms", "room_blend_until",
+        "heater_entity_ids", "temperature_sensor_entity_id",
+    })
 
     def __init__(self, entry, runtime) -> None:
         self._runtime = runtime

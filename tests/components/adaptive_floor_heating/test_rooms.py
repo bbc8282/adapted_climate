@@ -4,6 +4,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 import importlib
 import sys
+import time
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -98,6 +99,70 @@ class AggregatorTests(unittest.TestCase):
         self.assertAlmostEqual(rooms.temperature, 21.0)
         self.assertFalse(rooms.blending(1300))
 
+    def test_occupancy_dwell_ignores_flicker(self):
+        rooms = self.make(timeout=100000)
+        rooms.occupancy_dwell = 600
+        rooms.report_occupancy("binary_sensor.bed", "off", 0)      # first report counts at once
+        rooms.update(0)
+        self.assertEqual(rooms.active_rooms, ("living", "bed", "study"))
+        rooms.report_occupancy("binary_sensor.bed", "on", 100)
+        self.assertFalse(rooms.update(100))
+        self.assertEqual(rooms.next_deadline(100), 700)          # dwell expiry wakes the runtime
+        rooms.report_occupancy("binary_sensor.bed", "off", 400)    # flicker: the on-timer restarts
+        rooms.update(800)
+        self.assertEqual(rooms.active_rooms, ("living", "bed", "study"))
+        self.assertEqual(rooms.next_deadline(800), 100000)       # only sensor expiry, no dwell timer
+        rooms.report_occupancy("binary_sensor.bed", "on", 1000)
+        rooms.report_occupancy("binary_sensor.bed", "on", 1300)    # repeated on keeps the timer
+        rooms.update(1599)
+        self.assertEqual(rooms.active_rooms, ("living", "bed", "study"))
+        self.assertTrue(rooms.update(1600))
+        self.assertEqual(rooms.active_rooms, ("bed",))
+        rooms.report_occupancy("binary_sensor.bed", "unavailable", 2000)   # not on: leaves after the dwell
+        rooms.update(2599)
+        self.assertEqual(rooms.active_rooms, ("bed",))
+        rooms.update(2600)
+        self.assertEqual(rooms.active_rooms, ("living", "bed", "study"))
+
+    def test_hold_keeps_rooms_and_applies_pending_later(self):
+        rooms = self.make()
+        rooms.update(0)
+        rooms.report_occupancy("binary_sensor.bed", "on")
+        self.assertFalse(rooms.update(10, hold=True))
+        self.assertEqual(rooms.active_rooms, ("living", "bed", "study"))
+        self.assertEqual(rooms.pending_rooms, ("bed",))
+        self.assertAlmostEqual(rooms.temperature, 21.0)
+        self.assertFalse(rooms.blending(10))
+        self.assertTrue(rooms.update(20))                          # released: 21.0 -> 18.0 blends
+        self.assertEqual(rooms.active_rooms, ("bed",))
+        self.assertIsNone(rooms.pending_rooms)
+        self.assertTrue(rooms.blending(20))
+        # A held room without a fresh temperature still drops out.
+        rooms.report_occupancy("binary_sensor.bed", "off")
+        rooms.active_rooms, rooms.temperature = ("living", "bed", "study"), 21.0
+        rooms._blend_started = None
+        rooms.report_sensor("sensor.b1", None, 30)
+        rooms.update(30, hold=True)
+        self.assertEqual(rooms.active_rooms, ("living", "study"))
+
+    def test_small_switch_applies_at_once_without_learning_change(self):
+        rooms = self.make(rooms=(LIVING, BED))
+        for entity, value in (("sensor.l1", 20.0), ("sensor.l2", 20.4), ("sensor.b1", 20.0)):
+            rooms.report_sensor(entity, value, 0.0)
+        rooms.update(0)
+        self.assertAlmostEqual(rooms.temperature, 20.1)
+        rooms.report_occupancy("binary_sensor.living", "on")
+        self.assertFalse(rooms.update(10))                         # 20.1 -> 20.2: below 0.3 °C
+        self.assertEqual(rooms.active_rooms, ("living",))
+        self.assertAlmostEqual(rooms.temperature, 20.2)
+        self.assertFalse(rooms.blending(10))
+        rooms.report_sensor("sensor.l2", 21.0, 15)                 # living 20.5
+        rooms.update(15)
+        rooms.report_occupancy("binary_sensor.living", "off")
+        rooms.report_occupancy("binary_sensor.bed", "on")
+        self.assertTrue(rooms.update(20))                          # 20.5 -> 20.0: blends
+        self.assertTrue(rooms.blending(20))
+
     def test_no_blend_from_missing_temperature(self):
         rooms = self.make(rooms=(STUDY,))
         rooms.update(0)
@@ -180,6 +245,9 @@ class RuntimeRoomTests(unittest.IsolatedAsyncioTestCase):
             self.write(entity, value, TEMPERATURE)
         self.write("binary_sensor.living", "off", {})
 
+    def no_dwell(self):
+        self.entry.options = {**self.entry.options, "occupancy_dwell_minutes": 0}
+
     def write(self, entity_id, value, attributes=None):
         previous = self.states.get(entity_id)
         attributes = attributes if attributes is not None else (previous.attributes if previous else {})
@@ -243,20 +311,13 @@ class RuntimeRoomTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(runtime.controller.sensor_fault)
         self.assertEqual(runtime.controller.temperature, 20.0)
 
-    async def test_occupancy_blends_and_excludes_learning(self):
-        runtime = await self.start(mode="heat")
-        await self.settle()
-        self.assertTrue(runtime.actuator.observed)          # 19.5 < 21 - 0.5
-        cycle = runtime.curve_tracker.cycle
-        self.assertIsNotNone(cycle)
-        self.assertIsNone(cycle.invalid_reason)
-        self.assertIsNotNone(runtime.observation.heating_started)
+    async def test_occupancy_blends_when_idle(self):
+        self.no_dwell()
+        runtime = await self.start()
         self.write("binary_sensor.living", "on")            # living only: 21.0
         self.assertEqual(runtime.room_attributes()["active_rooms"], ["living"])
         self.assertAlmostEqual(runtime.controller.temperature, 19.5, places=3)   # blend starts at the shown value
         self.assertIsNotNone(runtime.room_attributes()["room_blend_until"])
-        self.assertEqual(cycle.invalid_reason, ROOM_SET_CHANGED)
-        self.assertIsNone(runtime.observation.heating_started)
         self.loop.offset += ROOM_TRANSITION_SECONDS / 3
         self.write("sensor.l1", "20")
         self.assertAlmostEqual(runtime.controller.temperature, 19.5 + 1.5 / 3, places=3)
@@ -266,7 +327,69 @@ class RuntimeRoomTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(runtime.controller.temperature, 21.0, places=3)
         self.assertIsNone(runtime.room_attributes()["room_blend_until"])
 
+    async def test_default_dwell_ignores_brief_occupancy(self):
+        runtime = await self.start()
+        self.assertEqual(runtime.occupancy_dwell, 600)
+        self.write("binary_sensor.living", "on")
+        self.loop.offset += 300
+        self.write("binary_sensor.living", "off")           # 5-minute flicker never counts
+        self.loop.offset += 400
+        runtime.evaluate()
+        self.write("sensor.l1", "20")
+        self.assertEqual(runtime.room_attributes()["active_rooms"], ["living", "bed"])
+        self.write("binary_sensor.living", "on")
+        self.loop.offset += 601
+        runtime.evaluate()
+        self.assertEqual(runtime.room_attributes()["active_rooms"], ["living"])
+        runtime.set_occupancy_dwell(0)                       # live option edit
+        self.assertEqual(runtime.room_aggregator.occupancy_dwell, 0)
+
+    async def test_room_switch_waits_for_heating_cycle_and_peak(self):
+        self.no_dwell()
+        runtime = await self.start(Settings(minimum_on_time=0, minimum_off_time=0, sensor_timeout=10800,
+                                            peak_observation_hours=1), mode="heat")
+        await self.settle()
+        self.assertTrue(runtime.actuator.observed)          # 19.5 < 21 - 0.5
+        cycle = runtime.curve_tracker.cycle
+        self.write("binary_sensor.living", "on")            # held while heating
+        attrs = runtime.room_attributes()
+        self.assertEqual(attrs["active_rooms"], ["living", "bed"])
+        self.assertEqual(attrs["pending_rooms"], ["living"])
+        self.assertIsNone(attrs["room_blend_until"])
+        self.assertIsNone(cycle.invalid_reason)
+        self.assertIsNotNone(runtime.observation.heating_started)
+        self.loop.offset += 600
+        for entity, value in (("sensor.l1", "24"), ("sensor.l2", "24"), ("sensor.b1", "20")):
+            self.write(entity, value)
+        await self.settle()
+        self.assertFalse(runtime.actuator.observed)         # 22.0 reached the target
+        self.assertIsNotNone(cycle.off_at)
+        self.assertEqual(runtime.room_attributes()["active_rooms"], ["living", "bed"])   # still held until the peak
+        self.assertIsNone(cycle.invalid_reason)
+        self.loop.offset += 3601                            # peak observation limit ends the hold
+        wall = time.time
+        with patch("time.time", lambda: wall() + self.loop.offset):    # curve clock uses wall time
+            self.write("sensor.l1", "24")
+        self.assertIsNone(runtime.curve_tracker.cycle)
+        attrs = runtime.room_attributes()
+        self.assertEqual(attrs["active_rooms"], ["living"])
+        self.assertIsNone(attrs["pending_rooms"])
+        self.assertIsNotNone(attrs["room_blend_until"])     # 22.0 -> 24.0 blends
+
+    async def test_small_reference_switch_does_not_exclude_learning(self):
+        self.no_dwell()
+        for entity, value in (("sensor.l1", "19.4"), ("sensor.l2", "19.6"), ("sensor.b1", "19.3")):
+            self.write(entity, value)
+        runtime = await self.start()
+        with patch.object(runtime, "_exclude_room_transition") as exclude:
+            self.write("binary_sensor.living", "on")
+            self.assertEqual(runtime.room_attributes()["active_rooms"], ["living"])
+            self.assertIsNone(runtime.room_attributes()["room_blend_until"])
+            self.assertAlmostEqual(runtime.controller.temperature, 19.5, places=3)
+            exclude.assert_not_called()
+
     async def test_cycle_started_during_blend_is_excluded(self):
+        self.no_dwell()
         runtime = await self.start()
         self.write("binary_sensor.living", "on")
         runtime.set_mode("heat")                            # starts heating mid-blend
@@ -293,7 +416,8 @@ class RuntimeRoomTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(runtime.room_aggregator)
         self.assertEqual(runtime.controller.temperature, 30.0)
         self.assertEqual(runtime.room_attributes(), {
-            "room_temperatures": {"sensor.room": 30.0}, "active_rooms": ["sensor.room"], "room_blend_until": None,
+            "room_temperatures": {"sensor.room": 30.0}, "active_rooms": ["sensor.room"],
+            "pending_rooms": None, "room_blend_until": None,
         })
         listener = next(item for item in self.hass.bus.listeners if item[0] == "state_reported")
         self.assertTrue(listener[2]({"entity_id": "sensor.room"}))
@@ -344,7 +468,8 @@ class RoomsOptionsFlowTests(unittest.IsolatedAsyncioTestCase):
         flow, form = await self.flow_at_rooms()
         self.assertEqual(form["step_id"], "rooms")
         keys = [str(key) for key in form["data_schema"].schema]
-        self.assertEqual(keys, [f"room_{i}_{field}" for i in range(1, 5) for field in ("name", "sensors", "occupancy")])
+        self.assertEqual(keys, [f"room_{i}_{field}" for i in range(1, 5) for field in ("name", "sensors", "occupancy")]
+                         + ["occupancy_dwell_minutes"])
         sensors = form["data_schema"].schema
         field = next(value for key, value in sensors.items() if str(key) == "room_1_sensors")
         self.assertEqual(field.config, {"domain": "sensor", "device_class": "temperature", "multiple": True})
@@ -361,6 +486,7 @@ class RoomsOptionsFlowTests(unittest.IsolatedAsyncioTestCase):
             {"name": "Bed", "sensors": ["sensor.a"], "occupancy": None},
         ])
         self.assertEqual(len(decode_rooms(result["data"]["rooms"])), 2)
+        self.assertEqual(result["data"]["occupancy_dwell_minutes"], 10)   # default for older entries
 
     async def test_all_empty_falls_back_and_existing_rooms_are_suggested(self):
         stored = [{"name": "Living", "sensors": ["sensor.a"], "occupancy": None}]
@@ -394,6 +520,13 @@ class RoomsOptionsFlowTests(unittest.IsolatedAsyncioTestCase):
                 result = await flow.async_step_rooms(user_input)
                 self.assertEqual(result["step_id"], "rooms")
                 self.assertEqual(result["errors"], errors)
+        result = await flow.async_step_rooms({"room_1_name": "A", "room_1_sensors": ["sensor.a"],
+                                              "occupancy_dwell_minutes": 121})
+        self.assertEqual(result["errors"], {"occupancy_dwell_minutes": "invalid_setting"})
+        result = await flow.async_step_rooms({"room_1_name": "A", "room_1_sensors": ["sensor.a"],
+                                              "occupancy_dwell_minutes": 3.0})
+        self.assertEqual(result["step_id"], "schedule")
+        self.assertEqual(flow._options_draft["occupancy_dwell_minutes"], 3)
         self.states["sensor.a"].state = "unavailable"
         result = await flow.async_step_rooms({"room_1_name": "A", "room_1_sensors": ["sensor.a"]})
         self.assertEqual(result["errors"], {"room_1_sensors": "entity_unavailable"})
