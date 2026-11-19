@@ -1,13 +1,16 @@
 """Expose standalone thermostat intent; related: runtime.py and controller.py."""
 
+import json
 from typing import Any
 
 from homeassistant.components.climate import ClimateEntity, ClimateEntityFeature, HVACAction, HVACMode
 from homeassistant.const import ATTR_TEMPERATURE, UnitOfTemperature
+from homeassistant.core import callback
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
+from homeassistant.helpers.event import async_call_later
 
-from .const import DOMAIN, MAX_TARGET, MIN_TARGET, NAME
+from .const import DIAGNOSTIC_WRITE_INTERVAL, DOMAIN, MAX_TARGET, MIN_TARGET, NAME
 from .entity_naming import entity_id
 from .curve_api import heating_curve_preview
 from .diagnostics import learning_summary
@@ -46,9 +49,21 @@ class AdaptiveFloorHeatingClimate(ClimateEntity):
         "last_cooling_prediction", "room_temperatures", "pending_rooms", "room_blend_until",
         "heater_entity_ids", "temperature_sensor_entity_id",
     })
+    # Recorded sub-fields that change on every evaluation without changing the forecast itself.
+    # They stay in the published attribute and are only left out of the write signature;
+    # the deferred diagnostic write still publishes them within DIAGNOSTIC_WRITE_INTERVAL.
+    _signature_volatile_fields: dict[str, frozenset[str]] = {
+        "off_prediction": frozenset({"generated_at"}),
+    }
 
     def __init__(self, entry, runtime) -> None:
         self._runtime = runtime
+        # Write throttling state; related: _async_runtime_updated.
+        self._last_signature: str | None = None
+        self._last_write_at: float | None = None
+        self._deferred_write_unsub = None
+        self._prepared_attributes: dict[str, Any] | None = None
+        self._write_stopped = False
         self._attr_unique_id = f"{entry.entry_id}_climate"
         self.entity_id = entity_id(runtime.hass, entry, "climate", "")
         # Register the software thermostat; related: const.py and config_flow.py.
@@ -60,13 +75,84 @@ class AdaptiveFloorHeatingClimate(ClimateEntity):
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
-        self.async_on_remove(self._runtime.subscribe(self.async_write_ha_state))
+        self._write_stopped = False
+        self._last_signature = self._last_write_at = None
+        self.async_on_remove(self._runtime.subscribe(self._async_runtime_updated))
+        self.async_on_remove(self._cancel_deferred_write)
         await self._runtime.async_start()
 
     async def async_will_remove_from_hass(self) -> None:
         # Entity disable/removal also stops control, even without entry unloading.
         await self._runtime.async_stop()
+        # Drop a pending diagnostic write after the final stop notification.
+        self._write_stopped = True
+        self._cancel_deferred_write()
         await super().async_will_remove_from_hass()
+
+    # Single write path for runtime notifications: recorded changes are written at once,
+    # unrecorded-only changes at most once per DIAGNOSTIC_WRITE_INTERVAL. The panel reads
+    # hass.states (live, not Recorder), so diagnostics there lag by at most that interval.
+    @callback
+    def _async_runtime_updated(self) -> None:
+        if self._write_stopped:
+            return
+        attributes = self._build_extra_state_attributes()
+        signature = self._significant_signature(attributes)
+        if signature != self._last_signature:
+            self._write_state(signature, attributes)
+            return
+        if self._deferred_write_unsub is not None:
+            return                                # the pending write publishes the latest values
+        now = self.hass.loop.time()
+        remaining = (0.0 if self._last_write_at is None
+                     else self._last_write_at + DIAGNOSTIC_WRITE_INTERVAL - now)
+        if remaining <= 0:
+            self._write_state(signature, attributes)
+            return
+        self._deferred_write_unsub = async_call_later(self.hass, remaining, self._async_deferred_write)
+
+    @callback
+    def _async_deferred_write(self, _now=None) -> None:
+        self._deferred_write_unsub = None
+        if self._write_stopped:
+            return
+        attributes = self._build_extra_state_attributes()
+        self._write_state(self._significant_signature(attributes), attributes)
+
+    def _write_state(self, signature: str, attributes: dict[str, Any]) -> None:
+        self._cancel_deferred_write()
+        self._last_signature = signature
+        self._last_write_at = self.hass.loop.time()
+        # Reuse the attributes already built for the signature during this write.
+        self._prepared_attributes = attributes
+        try:
+            self.async_write_ha_state()
+        finally:
+            self._prepared_attributes = None
+
+    @callback
+    def _cancel_deferred_write(self) -> None:
+        if self._deferred_write_unsub is not None:
+            self._deferred_write_unsub()
+            self._deferred_write_unsub = None
+
+    def _significant_signature(self, attributes: dict[str, Any]) -> str:
+        """Serialize the state and every recorded attribute, minus volatile sub-fields."""
+        if not self.available:
+            return json.dumps(["unavailable"])
+        unrecorded = self._unrecorded_attributes | getattr(
+            self, "_entity_component_unrecorded_attributes", frozenset()
+        )
+        combined = {**(getattr(self, "state_attributes", None) or {}), **attributes}
+        recorded = {}
+        for key, value in combined.items():
+            if key in unrecorded:
+                continue
+            volatile = self._signature_volatile_fields.get(key)
+            if volatile and isinstance(value, dict):
+                value = {field: item for field, item in value.items() if field not in volatile}
+            recorded[key] = value
+        return json.dumps([getattr(self, "state", None), recorded], sort_keys=True, default=str)
 
     @property
     def available(self) -> bool:
@@ -102,6 +188,11 @@ class AdaptiveFloorHeatingClimate(ClimateEntity):
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
+        if self._prepared_attributes is not None:
+            return self._prepared_attributes
+        return self._build_extra_state_attributes()
+
+    def _build_extra_state_attributes(self) -> dict[str, Any]:
         runtime = self._runtime
         faults = sorted(runtime.controller.faults)
         if runtime.controller.sensor_fault:

@@ -52,6 +52,8 @@ DEFAULT_SENSOR_TIMEOUT = 900
 OVERHEAT_TEMPERATURE = 35.0
 OVERHEAT_RESET = 34.0
 RECOVERY_INTERVAL = 30.0
+# Climate state writes that change only unrecorded diagnostics are coalesced to one per interval (s).
+DIAGNOSTIC_WRITE_INTERVAL = 60
 HEATER_UNAVAILABLE_DELAY = 10.0
 COMMAND_TIMEOUT = 10.0
 OFF_RETRY_DELAYS = (5.0, 10.0)

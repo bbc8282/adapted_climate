@@ -68,6 +68,11 @@ class FakeClimateEntity:
         self.writes = getattr(self, "writes", 0) + 1
 
 
+def fake_call_later(hass, delay, action):
+    """Mirror HA async_call_later: run action(now) after delay; return the canceller."""
+    return hass.loop.call_later(delay, action, None).cancel
+
+
 def boundary_modules():
     modules = {name: types.ModuleType(name) for name in (
         "homeassistant", "homeassistant.core", "homeassistant.const", "homeassistant.helpers",
@@ -80,6 +85,7 @@ def boundary_modules():
         "homeassistant.components.sensor",
         "homeassistant.helpers.device_registry",
         "homeassistant.helpers.entity_registry",
+        "homeassistant.helpers.event",
     )}
     for name in ("homeassistant", "homeassistant.helpers", "homeassistant.components"):
         modules[name].__path__ = []
@@ -92,6 +98,7 @@ def boundary_modules():
     modules["homeassistant.helpers.entity_registry"].async_entries_for_config_entry = (
         lambda registry, entry_id: registry.get(entry_id, [])
     )
+    modules["homeassistant.helpers.event"].async_call_later = fake_call_later
     const = modules["homeassistant.const"]
     const.Platform = SimpleNamespace(CLIMATE="climate", SENSOR="sensor", SELECT="select", NUMBER="number", SWITCH="switch", BUTTON="button", TIME="time")
     const.ATTR_TEMPERATURE = "temperature"
