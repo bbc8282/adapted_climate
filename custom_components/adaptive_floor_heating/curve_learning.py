@@ -831,7 +831,12 @@ class CurveTracker:
             cycle.on_history.add(now, self.temperature)
         if cycle.off_at is not None and cycle.peak_at is None:
             previous = cycle.off_reports[-1] if cycle.off_reports else None
-            if len(cycle.off_reports) < 4096:
+            # off_reports is consumed as a held step function, so an unchanged value adds
+            # no information. Frequent same-value re-reports (state_reported) used to
+            # overflow the buffer and reject every cycle; skip them losslessly.
+            if previous is not None and previous[1] == self.temperature:
+                pass
+            elif len(cycle.off_reports) < 4096:
                 if previous is None or now > previous[0]:
                     cycle.off_reports.append((now, self.temperature))
             else:
