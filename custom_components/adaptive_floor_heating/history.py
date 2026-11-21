@@ -27,7 +27,13 @@ PEAK_CONFIRM_EXTRA_DROP = 0.1
 
 @dataclass
 class PeakTracker:
-    """Confirm a 0.2 C fall followed by another 0.1 C fall; related: curve_learning.py."""
+    """Confirm a 0.2 C fall, then a later report another 0.1 C below that first fall.
+
+    The extra fall is measured from the first qualifying report, not between adjacent
+    reports: averaged multi-sensor rooms move in 0.01-0.05 C steps, so a 0.1 C fall
+    between two consecutive reports almost never happens on a slow floor coast.
+    Related: curve_learning.py.
+    """
 
     off_at: float
     peak_at: float
@@ -39,6 +45,7 @@ class PeakTracker:
     previous_at: float | None = None
     decline_reports: int = 0
     confirmation_extra_drop: float | None = None
+    decline_temperature: float | None = None
 
     def report(self, temperature: float, now: float) -> bool:
         """Ignore small dips and duplicate reports; retain the last actual maximum timestamp."""
@@ -58,16 +65,18 @@ class PeakTracker:
             self.decline_reports = 0
             self.confirmation_extra_drop = None
         elif self.responded and self.peak_temperature - temperature >= PEAK_CONFIRM_DROP - 1e-9:
-            # Require the next distinct real report to fall further, not merely repeat a low value.
+            # A later distinct real report must sit a further 0.1 C below the first qualifying
+            # fall; repeating the same low value never confirms. The anchor stays put while the
+            # temperature remains in the decline zone, so slow averaged declines accumulate.
             # Related: curve_storage.py retained confirmation evidence and diagnostic_snapshot phase.
-            extra_drop = (self.previous_temperature - temperature
-                          if self.previous_temperature is not None else None)
-            if (self.decline_reports >= 1 and extra_drop is not None
-                    and extra_drop >= PEAK_CONFIRM_EXTRA_DROP - 1e-9):
-                self.decline_reports = PEAK_CONFIRM_REPORTS
-                self.confirmation_extra_drop = extra_drop
+            if self.decline_reports >= 1 and self.decline_temperature is not None:
+                extra_drop = self.decline_temperature - temperature
+                if extra_drop >= PEAK_CONFIRM_EXTRA_DROP - 1e-9:
+                    self.decline_reports = PEAK_CONFIRM_REPORTS
+                    self.confirmation_extra_drop = extra_drop
             else:
                 self.decline_at, self.decline_reports = now, 1
+                self.decline_temperature = temperature
                 self.confirmation_extra_drop = None
         else:
             self.decline_at = None

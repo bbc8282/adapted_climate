@@ -53,12 +53,39 @@ class PeakTrackerTests(unittest.TestCase):
         self.assertEqual(tracker.peak_at, 4)
         self.assertEqual(tracker.peak_temperature, 26.7)
 
-    def test_two_small_falls_do_not_accumulate_into_next_report_threshold(self):
+    def test_small_falls_accumulate_from_first_qualifying_decline(self):
+        # Averaged rooms fall in small steps; the extra 0.1 C is measured from the first
+        # qualifying report, so 26.3 -> 26.25 -> 26.2 confirms on the third report.
         tracker = PeakTracker(0, 0, 26.6, 26.0, True)
         self.assertFalse(tracker.report(26.3, 1))
         self.assertFalse(tracker.report(26.25, 2))
-        self.assertFalse(tracker.report(26.2, 3))
-        self.assertTrue(tracker.report(26.1, 4))
+        self.assertTrue(tracker.report(26.2, 3))
+        self.assertAlmostEqual(tracker.confirmation_extra_drop, .1)
+        self.assertEqual(tracker.peak_at, 0)
+
+    def test_slow_averaged_decline_confirms_peak(self):
+        # 2026-11-21 night cycle: two-sensor mean peaked at 25.3075 and fell by 0.025 C steps.
+        tracker = PeakTracker(0, 0, 25.3075, 24.5, True)
+        temperatures = [25.28, 25.25, 25.2, 25.175, 25.15, 25.1, 25.125, 25.1, 25.075,
+                        25.05, 25.025, 25.0]
+        results = [tracker.report(value, at) for at, value in enumerate(temperatures, start=1)]
+        self.assertTrue(any(results))
+        self.assertEqual(results.index(True), temperatures.index(25.0))
+        self.assertAlmostEqual(tracker.peak_temperature, 25.3075)
+
+    def test_decline_anchor_does_not_creep_down_with_each_report(self):
+        tracker = PeakTracker(0, 0, 26.6, 26.0, True)
+        for at, value in ((1, 26.4), (2, 26.35), (3, 26.33), (4, 26.31)):
+            self.assertFalse(tracker.report(value, at))
+        self.assertTrue(tracker.report(26.3, 5))
+
+    def test_single_noisy_low_report_cannot_confirm_alone(self):
+        tracker = PeakTracker(0, 0, 26.6, 26.0, True)
+        self.assertFalse(tracker.report(26.2, 1))
+        self.assertFalse(tracker.report(26.5, 2))
+        self.assertFalse(tracker.report(26.4, 3))
+        self.assertFalse(tracker.report(26.35, 4))
+        self.assertTrue(tracker.report(26.3, 5))
 
     def test_invalid_report_and_unobserved_response_cannot_confirm(self):
         tracker = PeakTracker(0, 0, 26.6, 26.6, False)
