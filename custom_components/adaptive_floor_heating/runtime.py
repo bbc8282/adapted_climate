@@ -18,7 +18,7 @@ from .const import (
     ROOM_SET_CHANGED,
     MIN_PEAK_OBSERVATION_HOURS, MAX_PEAK_OBSERVATION_HOURS,
     MODE_MULTI_ZONE_INTEGRATED, DEFAULT_PREDICTION_MODE,
-    HEATER_UNAVAILABLE_DELAY, PREDICTION_MODES, OFF_MODELS,
+    HEATER_UNAVAILABLE_DELAY, HEATER_UNAVAILABLE_GRACE, PREDICTION_MODES, OFF_MODELS,
 )
 from .controller import Decision, Settings, ThermostatController, temperature_celsius
 from .curve_learning import CurveCycle, CurveStandards, CurveTracker, BUCKET_SECONDS
@@ -121,6 +121,11 @@ class HeatingRuntime:
             entity_id: None for entity_id in self.heaters
         }
         self._heater_unavailable_started: float | None = None
+        # Heaters whose entity briefly went unavailable/unknown keep their last known
+        # state here until it returns or the grace expires. Related: _heater_hold_expired.
+        self.heater_hold_seconds = HEATER_UNAVAILABLE_GRACE
+        self._heater_hold: dict[str, asyncio.TimerHandle] = {}
+        self._stop_unsub: Callable[[], None] | None = None
         # Extended after each confirmed ON→OFF edge: configured minimum is a
         # floor, while a long floor-heating run gets twice its runtime to coast.
         self._minimum_off_until: float | None = None
@@ -333,9 +338,11 @@ class HeatingRuntime:
             "state_reported", event_received,
             event_filter=event_filter,
         ))
-        self._unsubs.append(self.hass.bus.async_listen_once(
+        # The one-time stop listener removes itself when it fires, so it is tracked apart
+        # from _unsubs and forgotten in _shutdown instead of being removed twice.
+        self._stop_unsub = self.hass.bus.async_listen_once(
             "homeassistant_stop", self._shutdown
-        ))
+        )
         for entity_id in self.heaters:
             self._heater_states[entity_id] = self._switch_state(
                 self.hass.states.get(entity_id)
@@ -396,7 +403,31 @@ class HeatingRuntime:
             state.attributes.get("device_class"),
         )
 
-    def _state_event(self, data) -> None:
+    @staticmethod
+    def _state_transiently_unknown(state) -> bool:
+        """True for a missing/unavailable/unknown entity state, not for a known but unusable one."""
+        return state is None or state.state in ("unavailable", "unknown")
+
+    def _release_heater_hold(self, entity_id: str) -> bool:
+        handle = self._heater_hold.pop(entity_id, None)
+        if handle is None:
+            return False
+        handle.cancel()
+        return True
+
+    def _heater_hold_expired(self, entity_id: str) -> None:
+        """The heater stayed unknown for the whole grace: run the normal unavailable handling."""
+        if self._closed or self._heater_hold.pop(entity_id, None) is None:
+            return
+        _LOGGER.warning(
+            "%s stayed unavailable for %.0f s; treating the heater as unavailable",
+            entity_id, self.heater_hold_seconds,
+        )
+        self._state_event(
+            {"entity_id": entity_id, "new_state": self.hass.states.get(entity_id)}, hold=False
+        )
+
+    def _state_event(self, data, *, hold: bool = True) -> None:
         """Consume current observations synchronously before dispatching decisions."""
         if self._closed:
             return
@@ -431,6 +462,21 @@ class HeatingRuntime:
             if entity_id not in self._heater_states:
                 self._notify()
                 return
+            # Ride out a brief unavailable/unknown blip on the last known state instead of
+            # invalidating the learning cycle and sending commands the entity would drop.
+            # Related: const.py HEATER_UNAVAILABLE_GRACE, evaluate().
+            if (hold and self.heater_hold_seconds > 0 and self._state_transiently_unknown(state)
+                    and self._heater_states[entity_id] is not None):
+                if entity_id not in self._heater_hold:
+                    _LOGGER.debug("%s is briefly unavailable; holding its last state", entity_id)
+                    self._heater_hold[entity_id] = self.hass.loop.call_later(
+                        self.heater_hold_seconds, self._heater_hold_expired, entity_id
+                    )
+                self._notify()
+                return
+            if self._release_heater_hold(entity_id) and not self._state_transiently_unknown(state):
+                # A command that timed out during the blip is a transient fault as well.
+                self.controller.faults.discard("actuation_fault")
             was_pending = self.actuator.busy
             previous = self.actuator.observed
             on_started_at = self.actuator.changed_at if previous is True else None
@@ -1067,7 +1113,9 @@ class HeatingRuntime:
         if decision.state != self.decision.state:
             _LOGGER.info("%s control state: %s", self.heater, decision.state)
         self.decision = decision
-        if self.controller.mode != "off":
+        # While a heater entity is briefly unavailable a command would be dropped by HA and
+        # time out into an actuation fault; the recovery state event re-runs this decision.
+        if self.controller.mode != "off" and not self._heater_hold:
             # Freeze the exact forecast sent to the actuator; related: actuator.py, curve_storage.py.
             if (decision.state == "PREDICTIVE_OFF" and self.off_prediction
                     and cycle is not None and self._predictive_stop is None
@@ -2119,10 +2167,18 @@ class HeatingRuntime:
         for unsub in self._unsubs:
             unsub()
         self._unsubs.clear()
+        if self._stop_unsub is not None:
+            self._stop_unsub()
+            self._stop_unsub = None
+        for handle in self._heater_hold.values():
+            handle.cancel()
+        self._heater_hold.clear()
         await self.actuator.close()
 
     async def _shutdown(self, event) -> None:
         """Bound best-effort OFF during HA shutdown and stop all callbacks."""
+        # HA already removed this one-time listener before calling it.
+        self._stop_unsub = None
         try:
             async with asyncio.timeout(15):
                 await self.async_stop()

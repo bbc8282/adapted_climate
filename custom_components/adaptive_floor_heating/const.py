@@ -55,6 +55,10 @@ RECOVERY_INTERVAL = 30.0
 # Climate state writes that change only unrecorded diagnostics are coalesced to one per interval (s).
 DIAGNOSTIC_WRITE_INTERVAL = 60
 HEATER_UNAVAILABLE_DELAY = 10.0
+# A heater entity that briefly reports unavailable/unknown (one missed poll of a boiler
+# controller, a Zigbee hiccup) keeps its last known state for this long before the
+# unavailable handling above starts. Related: runtime.py _state_event, _heater_hold_expired.
+HEATER_UNAVAILABLE_GRACE = 90.0
 COMMAND_TIMEOUT = 10.0
 OFF_RETRY_DELAYS = (5.0, 10.0)
 CONF_COLD_TOLERANCE = "cold_tolerance"

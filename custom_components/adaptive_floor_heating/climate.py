@@ -28,7 +28,7 @@ class AdaptiveFloorHeatingClimate(ClimateEntity):
     _attr_has_entity_name = True
     _attr_name = None
     _attr_icon = "mdi:heating-coil"
-    _attr_temperature_unit = UnitOfTemperature.CELSIUS
+    _attr_native_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_hvac_modes = [HVACMode.OFF, HVACMode.HEAT, HVACMode.AUTO]
     _attr_preset_modes = ["home", "away"]
     _attr_min_temp = MIN_TARGET
@@ -162,11 +162,11 @@ class AdaptiveFloorHeatingClimate(ClimateEntity):
                 and self._runtime.actuator.observed is not None)
 
     @property
-    def current_temperature(self) -> float | None:
+    def native_current_temperature(self) -> float | None:
         return self._runtime.controller.temperature
 
     @property
-    def target_temperature(self) -> float:
+    def native_target_temperature(self) -> float:
         return self._runtime.controller.target
 
     @property

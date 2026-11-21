@@ -687,7 +687,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def test_existing_restored_temperature_makes_climate_available(self):
         self.states["sensor.room"].attributes["restored"] = True
         await self.integration.async_setup_entry(self.hass, self.entry)
-        self.assertEqual(self.entities[0].current_temperature, 18)
+        self.assertEqual(self.entities[0].native_current_temperature, 18)
         self.assertTrue(self.entities[0].available)
 
     async def test_unavailable_initial_temperature_keeps_climate_unavailable(self):
@@ -977,7 +977,7 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
              "average_heating_duration", "last_peak_error", "mean_absolute_peak_error"},
         )
         entity = self.entities[0]
-        self.assertEqual(entity.target_temperature, 23)
+        self.assertEqual(entity.native_target_temperature, 23)
         self.assertTrue(entity.available)
         self.write("sensor.room", "18")
         self.assertGreater(self.sensor_entities[0].writes, 0)
@@ -987,10 +987,10 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         await self.settle()
         self.assertEqual(entity.hvac_mode, "heat")
         self.assertEqual(entity.hvac_action, "heating")
-        self.assertEqual(entity.target_temperature, 23)
+        self.assertEqual(entity.native_target_temperature, 23)
         await entity.async_set_preset_mode("away")
         self.assertEqual(entity.preset_mode, "away")
-        self.assertEqual(entity.target_temperature, 18)
+        self.assertEqual(entity.native_target_temperature, 18)
         self.assertEqual(entity._attr_unique_id, "one_climate")
         self.assertEqual(entity.entity_id, "climate.adaptive_heating_climate")
         with self.assertRaises(Exception):
@@ -1173,6 +1173,99 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
         self.runtime.controller.faults.add("heater_unavailable")
         self.write("switch.heater", "off")
         self.assertNotIn("heater_unavailable", self.runtime.controller.faults)
+
+    async def test_brief_heater_blip_holds_last_state_without_commands_or_faults(self):
+        await self.runtime.async_start()
+        self.runtime.set_mode("heat")
+        await self.settle()
+        self.assertTrue(self.runtime.actuator.observed)
+        cycle = self.runtime.curve_tracker.cycle
+        self.assertIsNotNone(cycle)
+        calls = len(self.calls)
+        self.write("switch.heater", "unavailable")
+        await self.settle()
+        # The blip keeps the confirmed ON state, the learning cycle and the climate entity.
+        self.assertIn("switch.heater", self.runtime._heater_hold)
+        self.assertTrue(self.runtime.actuator.observed)
+        self.assertIs(self.runtime.curve_tracker.cycle, cycle)
+        self.assertIsNone(cycle.invalid_reason)
+        self.assertIsNone(self.runtime._heater_unavailable_started)
+        self.assertEqual(self.runtime.controller.faults, set())
+        self.assertEqual(len(self.calls), calls)
+        self.write("switch.heater", "on")
+        await self.settle()
+        self.assertEqual(self.runtime._heater_hold, {})
+        self.assertTrue(self.runtime.actuator.observed)
+        self.assertIs(self.runtime.curve_tracker.cycle, cycle)
+        self.assertEqual(self.runtime.controller.faults, set())
+        self.assertEqual(len(self.calls), calls)
+
+    async def test_decision_change_during_heater_blip_waits_for_recovery(self):
+        await self.runtime.async_start()
+        self.write("sensor.room", "25")
+        self.runtime.set_mode("heat")
+        await self.settle()
+        self.assertFalse(self.runtime.actuator.observed)
+        calls = len(self.calls)
+        self.write("switch.heater", "unavailable")
+        self.write("sensor.room", "15")
+        await self.settle()
+        self.assertEqual(self.runtime.decision.state, "HEATING")
+        self.assertEqual(len(self.calls), calls)
+        self.assertNotIn("actuation_fault", self.runtime.controller.faults)
+        self.write("switch.heater", "off")
+        await self.settle()
+        self.assertEqual(self.calls[-1], ("switch", "turn_on", "switch.heater"))
+        self.assertTrue(self.runtime.actuator.observed)
+
+    async def test_heater_blip_longer_than_grace_runs_unavailable_handling(self):
+        await self.runtime.async_start()
+        self.runtime.heater_hold_seconds = 0.02
+        self.write("switch.heater", "unavailable")
+        self.assertFalse(self.runtime.actuator.observed)
+        await asyncio.sleep(0.05)
+        self.assertEqual(self.runtime._heater_hold, {})
+        self.assertIsNone(self.runtime.actuator.observed)
+        self.assertIsNotNone(self.runtime._heater_unavailable_started)
+        self.write("switch.heater", "off")
+        self.assertFalse(self.runtime.actuator.observed)
+        self.assertNotIn("heater_unavailable", self.runtime.controller.faults)
+
+    async def test_heater_recovery_from_blip_clears_command_timeout_fault(self):
+        await self.runtime.async_start()
+        self.write("switch.heater", "unavailable")
+        self.runtime.controller.faults.add("actuation_fault")
+        self.write("switch.heater", "off")
+        self.assertNotIn("actuation_fault", self.runtime.controller.faults)
+
+    async def test_startup_unavailable_heater_is_not_held(self):
+        self.write("switch.heater", "unavailable")
+        runtime = self.make_runtime()
+        await runtime.async_start()
+        self.write("switch.heater", "unavailable")
+        self.assertEqual(runtime._heater_hold, {})
+        self.assertIsNone(runtime.actuator.observed)
+        await runtime.async_stop()
+        await runtime._close()
+
+    async def test_shutdown_does_not_remove_fired_stop_listener_again(self):
+        removed = []
+        original = self.hass.bus.async_listen_once
+
+        def listen_once(event_type, listener):
+            remove = original(event_type, listener)
+            def tracked():
+                removed.append(event_type)
+                remove()
+            return tracked
+        self.hass.bus.async_listen_once = listen_once
+        await self.runtime.async_start()
+        await self.runtime._shutdown(None)
+        self.assertEqual(removed, [])
+        runtime = self.make_runtime()
+        await runtime.async_start()
+        self.assertTrue(await runtime.async_stop())
+        self.assertEqual(removed, ["homeassistant_stop"])
 
     async def test_heater_recovery_clears_transient_actuation_fault(self):
         await self.runtime.async_start()
